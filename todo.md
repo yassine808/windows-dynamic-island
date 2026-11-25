@@ -2,3 +2,8 @@
 - [ ] Also change the state (see picture) when dragged to the top of the screen, it should stick to the top (no gap)
 - [ ] remove ambient light around it
 - [ ] when i click on the island. it shouldn't click on whatever it's behind it
+- [ ] remove drag cursor when hovering on it (keep normal) unless actually dragging it
+- [ ] the buttons pause/play next and prev don't give IOS energy, do exactly their design
+- [ ] Then let's add another page inside it that for STT, that shows words in Realtime as I'm speaking in the app, when i finish talking it should write them wherever i have the text field selected (no auto-copy)
+- [ ] add feature that let's me scroll between it's page using mouse scroll wheel
+- [ ] Do exactly the design of IOS (like the contact between the app and the edge of screen shouldn't be 90*, do exactly like 2nd picture)
