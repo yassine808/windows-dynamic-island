@@ -13,8 +13,10 @@
     "windows": [
       {
         "label": "main",
-        "width": 420,
-        "height": 190,
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

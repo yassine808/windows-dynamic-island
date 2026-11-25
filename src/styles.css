@@ -17,19 +17,32 @@ html, body, #root {
   user-select: none;
 }
 
-.stage { display: flex; justify-content: center; }
+.stage { position: fixed; inset: 0; overflow: hidden; }
 
 .island {
+  position: absolute; left: 0; top: 0;
   background: #000;
   overflow: hidden;
-  position: relative;
+  cursor: grab;
+  touch-action: none;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  transition: box-shadow 0.3s;
 }
+.island.dragging { cursor: grabbing; box-shadow: 0 22px 50px rgba(0, 0, 0, 0.5); }
+
+.glow { position: absolute; left: 0; top: 0; pointer-events: none; }
+.halo { position: absolute; inset: -3px; border-radius: inherit; filter: blur(14px); transition: background 0.6s; }
+.halo.siri { background: conic-gradient(from var(--a), #ff375f, #bf5af2, #0a84ff, #30d158, #ff9f0a, #ff375f); animation: spin 3s linear infinite; }
+@property --a { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@keyframes spin { to { --a: 360deg; } }
 
 .row { position: absolute; inset: 0; display: flex; align-items: center; padding: 0 12px; gap: 10px; }
+.row.v { flex-direction: column; padding: 12px 0; justify-content: space-between; }
+.row.ex { flex-direction: column; align-items: stretch; justify-content: center; padding: 0 20px; gap: 12px; }
+.top { display: flex; gap: 14px; align-items: center; }
 .col { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 
-.art { width: 24px; height: 24px; border-radius: 6px; background: var(--fill); object-fit: cover; flex: none; }
+.art { width: 24px; height: 24px; border-radius: 6px; background: var(--fill) center / cover; flex: none; }
 .art.big { width: 64px; height: 64px; border-radius: 12px; }
 
 .title { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
