@@ -1,0 +1,56 @@
+:root {
+  --label: #fff;
+  --label-secondary: rgba(235, 235, 245, 0.6);
+  --fill: rgba(120, 120, 128, 0.36);
+  --red: #ff453a;
+  --font: "Inter Variable", "Segoe UI Variable", system-ui, sans-serif;
+}
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: var(--font);
+  color: var(--label);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+.stage { display: flex; justify-content: center; }
+
+.island {
+  background: #000;
+  overflow: hidden;
+  position: relative;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+
+.row { position: absolute; inset: 0; display: flex; align-items: center; padding: 0 12px; gap: 10px; }
+.col { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+
+.art { width: 24px; height: 24px; border-radius: 6px; background: var(--fill); object-fit: cover; flex: none; }
+.art.big { width: 64px; height: 64px; border-radius: 12px; }
+
+.title { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.artist { font-size: 13px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.transcript { font-size: 15px; font-weight: 500; line-height: 1.25; max-height: 38px; overflow: hidden; }
+.hint { color: var(--label-secondary); }
+
+.bars { display: flex; align-items: center; gap: 2px; height: 16px; flex: none; }
+.bars i { width: 3px; height: 100%; border-radius: 2px; background: #fff; transform-origin: center; }
+.bars.live i { animation: bar 0.9s ease-in-out infinite; }
+.bars.live i:nth-child(2) { animation-delay: -0.3s; }
+.bars.live i:nth-child(3) { animation-delay: -0.6s; }
+.bars.live i:nth-child(4) { animation-delay: -0.15s; }
+.bars.paused i { transform: scaleY(0.2); }
+@keyframes bar { 0%, 100% { transform: scaleY(0.25); } 50% { transform: scaleY(1); } }
+
+.mic { width: 36px; height: 36px; border-radius: 50%; background: var(--red); display: grid; place-items: center; flex: none; }
+
+.controls { display: flex; justify-content: center; gap: 36px; }
+.controls button { background: none; border: 0; color: #fff; padding: 4px; cursor: pointer; transition: transform 0.15s; }
+.controls button:active { transform: scale(0.85); }
+.controls svg { width: 28px; height: 28px; fill: currentColor; display: block; }
+
+@media (prefers-reduced-motion: reduce) { .bars.live i { animation: none; } }

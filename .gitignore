@@ -1,8 +1,4 @@
-__pycache__/
-*.py[cod]
-config/
-models/
-.venv/
-build/
-dist/
-*.spec
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
