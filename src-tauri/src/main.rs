@@ -7,7 +7,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[derive(Default)]
-struct Hit { r: [f64; 4], dragging: bool }
+struct Hit { r: [f64; 4], dragging: bool, p: (f64, f64, bool, bool) }
 type Shared = Arc<Mutex<Hit>>;
 
 #[cfg(windows)]
@@ -17,8 +17,28 @@ fn lbutton() -> bool {
 #[cfg(not(windows))]
 fn lbutton() -> bool { false }
 
+// Cursor position relative to the window's top-left, in physical px. Pure Win32: never waits on the UI thread.
+#[cfg(windows)]
+fn cursor_rel(h: isize) -> Option<(f64, f64)> {
+    use windows::Win32::{Foundation::{HWND, POINT, RECT}, UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect}};
+    unsafe {
+        let (mut p, mut r) = (POINT::default(), RECT::default());
+        GetCursorPos(&mut p).ok()?;
+        GetWindowRect(HWND(h as *mut _), &mut r).ok()?;
+        Some(((p.x - r.left) as f64, (p.y - r.top) as f64))
+    }
+}
+#[cfg(not(windows))]
+fn cursor_rel(_: isize) -> Option<(f64, f64)> { None }
+
 #[tauri::command]
 fn set_hit_rect(st: State<Shared>, x: f64, y: f64, w: f64, h: f64) { st.lock().unwrap().r = [x, y, w, h]; }
+
+#[tauri::command]
+fn get_ptr(st: State<Shared>) -> serde_json::Value {
+    let p = st.lock().unwrap().p;
+    serde_json::json!({ "x": p.0, "y": p.1, "down": p.2, "inside": p.3 })
+}
 
 #[tauri::command]
 fn log(msg: String) { println!("[js] {msg}"); }
@@ -38,7 +58,7 @@ fn main() {
         )
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
-            media::media_poll, media::media_art, media::media_control, set_hit_rect, set_dragging, log
+            media::media_poll, media::media_art, media::media_control, set_hit_rect, set_dragging, log, get_ptr
         ])
         .setup(move |app| {
             app.global_shortcut()
@@ -53,31 +73,25 @@ fn main() {
             win.set_ignore_cursor_events(true)?;
 
             // Window stays fully click-through. Rust reads the mouse and forwards it to the UI.
-            let handle = app.handle().clone();
+            let hwnd = win.hwnd()?.0 as isize;
+            let scale = win.scale_factor().unwrap_or(1.0);
+            println!("[rust] mouse thread starting, hwnd={hwnd} scale={scale}");
             thread::spawn(move || {
-                let mut last = (0i64, 0i64, false, false);
-                let mut hovered = false;
                 let mut n = 0u32;
                 loop {
                     thread::sleep(Duration::from_millis(8));
                     n += 1;
-                    let (c, p) = match (win.cursor_position(), win.outer_position()) {
-                        (Ok(c), Ok(p)) => (c, p),
-                        (a, b) => { if n % 120 == 0 { println!("[rust] cursor/outer error: {:?} {:?}", a.err(), b.err()); } continue; }
+                    let Some((px, py)) = cursor_rel(hwnd) else {
+                        if n % 120 == 0 { println!("[rust] cursor read failed"); }
+                        continue;
                     };
-                    let s = win.scale_factor().unwrap_or(1.0);
-                    let (x, y) = ((c.x - p.x as f64) / s, (c.y - p.y as f64) / s);
+                    let (x, y) = (px / scale, py / scale);
                     let (r, dragging) = { let g = shared.lock().unwrap(); (g.r, g.dragging) };
                     let pad = 10.0;
                     let inside = r[2] > 0.0 && x >= r[0] - pad && x <= r[0] + r[2] + pad && y >= r[1] - pad && y <= r[1] + r[3] + pad;
                     let down = lbutton();
-                    if n % 120 == 0 { println!("[rust] cursor=({:.0},{:.0}) rect={:?} inside={} down={} scale={}", x, y, r, inside, down, s); }
-                    let st = (x as i64, y as i64, down, inside);
-                    if (inside || dragging || down || hovered) && st != last {
-                        last = st;
-                        let _ = handle.emit("ptr", serde_json::json!({ "x": x, "y": y, "down": down, "inside": inside }));
-                    }
-                    hovered = inside;
+                    shared.lock().unwrap().p = (x, y, down, inside);
+                    if n % 120 == 0 { println!("[rust] cursor=({:.0},{:.0}) rect={:?} inside={} down={}", x, y, r, inside, down); }
                 }
             });
             Ok(())

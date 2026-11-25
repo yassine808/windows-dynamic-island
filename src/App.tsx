@@ -195,16 +195,15 @@ export default function App() {
   // report hit rect so Rust can toggle click-through
   useEffect(() => {
     if (!TAURI) return;
-    let raf = 0, last = "";
-    const loop = () => {
+    let last = "";
+    dbg("hit-rect loop started");
+    const id = setInterval(() => {
       const s = lift.get(), cw = w.get() * s, ch = h.get() * s;
       const px = x.get() - (cw - w.get()) / 2, py = y.get() - (ch - h.get()) / 2;
       const k = [px, py, cw, ch].map((n) => Math.round(n)).join();
       if (k !== last) { last = k; invoke("set_hit_rect", { x: px, y: py, w: cw, h: ch }); }
-      raf = requestAnimationFrame(loop);
-    };
-    loop();
-    return () => cancelAnimationFrame(raf);
+    }, 16);
+    return () => clearInterval(id);
   }, []);
 
   // drag + snap
@@ -262,14 +261,15 @@ export default function App() {
   useEffect(() => {
     if (!TAURI) return;
     let active = false, btn: HTMLElement | null = null;
-    const sub = listen<{ x: number; y: number; down: boolean; inside: boolean }>("ptr", (e) => {
+    type P = { x: number; y: number; down: boolean; inside: boolean };
+    const onPtr = (e: { payload: P }) => {
       const { x: px, y: py, down: dn, inside } = e.payload;
-      if (dn || inside) dbg(`ptr ${px | 0},${py | 0} down=${dn} inside=${inside}`);
       const f = fn.current;
       if (!d.current?.on) setHover(inside);
       if (dn && !active) {
         if (!inside) return;
         active = true;
+        dbg(`press ${px | 0},${py | 0}`);
         btn = document.elementFromPoint(px, py)?.closest("button") as HTMLElement | null;
         if (!btn) f.pdown(px, py);
       } else if (dn && active) {
@@ -281,8 +281,20 @@ export default function App() {
           btn = null;
         } else f.pup();
       }
-    });
-    return () => { sub.then((u) => u()); };
+    };
+    let busy = false, n = 0;
+    dbg("ptr poll started, visibility=" + document.visibilityState);
+    const id = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const p = await invoke<P>("get_ptr");
+        if (++n % 150 === 1) dbg(`poll #${n} ${JSON.stringify(p)}`);
+        onPtr({ payload: p });
+      } catch (err) { dbg("get_ptr failed: " + String(err)); }
+      busy = false;
+    }, 16);
+    return () => clearInterval(id);
   }, []);
 
   // keep position proportional when the overlay window gets resized to the monitor
