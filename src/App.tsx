@@ -8,6 +8,12 @@ type Mode = "idle" | "media" | "listening" | "expanded";
 type Edge = "top" | "bottom" | "left" | "right";
 
 const TAURI = "__TAURI_INTERNALS__" in window;
+const dbg = (m: string) => TAURI && invoke("log", { msg: m });
+if (TAURI) {
+  addEventListener("error", (e) => dbg("error: " + e.message));
+  addEventListener("unhandledrejection", (e) => dbg("reject: " + String(e.reason)));
+  dbg(`boot ${innerWidth}x${innerHeight} dpr=${devicePixelRatio}`);
+}
 const call = (c: string, a?: Record<string, unknown>) => (TAURI ? invoke(c, a) : Promise.resolve(null));
 const GAP = 10;
 const spring = { type: "spring", stiffness: 380, damping: 28, mass: 0.9 } as const;
@@ -161,7 +167,6 @@ export default function App() {
     const subs = [
       listen("toggle-listen", toggle),
       listen<string>("stt-partial", (e) => setText(e.payload)),
-      listen<boolean>("hover", (e) => setHover(e.payload)),
     ];
     const key = (e: KeyboardEvent) => e.ctrlKey && e.altKey && e.code === "Space" && toggle();
     addEventListener("keydown", key);
@@ -204,16 +209,14 @@ export default function App() {
 
   // drag + snap
   const d = useRef<{ gx: number; gy: number; sx: number; sy: number; on: boolean; vx: number; vy: number; lx: number; ly: number; lt: number } | null>(null);
-  const down = (e: React.PointerEvent) => {
-    if ((e.target as HTMLElement).closest("button")) return;
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    d.current = { gx: e.clientX - x.get(), gy: e.clientY - y.get(), sx: e.clientX, sy: e.clientY, on: false, vx: 0, vy: 0, lx: e.clientX, ly: e.clientY, lt: performance.now() };
+  const pdown = (cx: number, cy: number) => {
+    d.current = { gx: cx - x.get(), gy: cy - y.get(), sx: cx, sy: cy, on: false, vx: 0, vy: 0, lx: cx, ly: cy, lt: performance.now() };
   };
-  const mv = (e: React.PointerEvent) => {
+  const pmove = (cx: number, cy: number) => {
     const s = d.current;
     if (!s) return;
     if (!s.on) {
-      if (Math.hypot(e.clientX - s.sx, e.clientY - s.sy) < 4) return;
+      if (Math.hypot(cx - s.sx, cy - s.sy) < 4) return;
       s.on = true;
       const lx = x.get(), ly = y.get();
       fx.set(0); fy.set(0); ex.set(lx); ey.set(ly);
@@ -222,12 +225,12 @@ export default function App() {
       call("set_dragging", { on: true });
     }
     const now = performance.now(), dt = Math.max(1, now - s.lt);
-    s.vx = s.vx * 0.6 + ((e.clientX - s.lx) / dt) * 1000 * 0.4;
-    s.vy = s.vy * 0.6 + ((e.clientY - s.ly) / dt) * 1000 * 0.4;
-    s.lx = e.clientX; s.ly = e.clientY; s.lt = now;
-    ex.set(e.clientX - s.gx); ey.set(e.clientY - s.gy);
+    s.vx = s.vx * 0.6 + ((cx - s.lx) / dt) * 1000 * 0.4;
+    s.vy = s.vy * 0.6 + ((cy - s.ly) / dt) * 1000 * 0.4;
+    s.lx = cx; s.ly = cy; s.lt = now;
+    ex.set(cx - s.gx); ey.set(cy - s.gy);
   };
-  const up = () => {
+  const pup = () => {
     const s = d.current;
     d.current = null;
     if (!s?.on) return;
@@ -242,6 +245,58 @@ export default function App() {
     along.current = a;
     setEdge(e); setDragging(false); setNonce((n) => n + 1);
   };
+
+  const fn = useRef({ pdown, pmove, pup });
+  fn.current = { pdown, pmove, pup };
+
+  // browser fallback (no Tauri): normal DOM pointer events
+  const down = (e: React.PointerEvent) => {
+    if (TAURI || (e.target as HTMLElement).closest("button")) return;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    pdown(e.clientX, e.clientY);
+  };
+  const mv = (e: React.PointerEvent) => !TAURI && pmove(e.clientX, e.clientY);
+  const up = () => !TAURI && pup();
+
+  // Tauri: Rust reads the mouse (window stays click-through) and sends it here
+  useEffect(() => {
+    if (!TAURI) return;
+    let active = false, btn: HTMLElement | null = null;
+    const sub = listen<{ x: number; y: number; down: boolean; inside: boolean }>("ptr", (e) => {
+      const { x: px, y: py, down: dn, inside } = e.payload;
+      if (dn || inside) dbg(`ptr ${px | 0},${py | 0} down=${dn} inside=${inside}`);
+      const f = fn.current;
+      if (!d.current?.on) setHover(inside);
+      if (dn && !active) {
+        if (!inside) return;
+        active = true;
+        btn = document.elementFromPoint(px, py)?.closest("button") as HTMLElement | null;
+        if (!btn) f.pdown(px, py);
+      } else if (dn && active) {
+        if (!btn) f.pmove(px, py);
+      } else if (!dn && active) {
+        active = false;
+        if (btn) {
+          if (document.elementFromPoint(px, py)?.closest("button") === btn) btn.click();
+          btn = null;
+        } else f.pup();
+      }
+    });
+    return () => { sub.then((u) => u()); };
+  }, []);
+
+  // keep position proportional when the overlay window gets resized to the monitor
+  useEffect(() => {
+    let lw = innerWidth, lh = innerHeight;
+    const on = () => {
+      const horiz = edge === "top" || edge === "bottom";
+      along.current *= horiz ? innerWidth / lw : innerHeight / lh;
+      lw = innerWidth; lh = innerHeight;
+      setNonce((n) => n + 1);
+    };
+    addEventListener("resize", on);
+    return () => removeEventListener("resize", on);
+  }, [edge]);
 
   const control = (action: string) => {
     if (!TAURI && media) setMedia({ ...media, playing: action === "toggle" ? !media.playing : media.playing });

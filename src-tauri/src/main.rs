@@ -10,8 +10,18 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 struct Hit { r: [f64; 4], dragging: bool }
 type Shared = Arc<Mutex<Hit>>;
 
+#[cfg(windows)]
+fn lbutton() -> bool {
+    unsafe { (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 }
+}
+#[cfg(not(windows))]
+fn lbutton() -> bool { false }
+
 #[tauri::command]
 fn set_hit_rect(st: State<Shared>, x: f64, y: f64, w: f64, h: f64) { st.lock().unwrap().r = [x, y, w, h]; }
+
+#[tauri::command]
+fn log(msg: String) { println!("[js] {msg}"); }
 
 #[tauri::command]
 fn set_dragging(st: State<Shared>, on: bool) { st.lock().unwrap().dragging = on; }
@@ -28,7 +38,7 @@ fn main() {
         )
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
-            media::media_poll, media::media_art, media::media_control, set_hit_rect, set_dragging
+            media::media_poll, media::media_art, media::media_control, set_hit_rect, set_dragging, log
         ])
         .setup(move |app| {
             app.global_shortcut()
@@ -42,21 +52,32 @@ fn main() {
             }
             win.set_ignore_cursor_events(true)?;
 
-            // Click-through everywhere except over the island. Also drives hover.
+            // Window stays fully click-through. Rust reads the mouse and forwards it to the UI.
             let handle = app.handle().clone();
             thread::spawn(move || {
-                let (mut interactive, mut hovered) = (false, false);
+                let mut last = (0i64, 0i64, false, false);
+                let mut hovered = false;
+                let mut n = 0u32;
                 loop {
-                    thread::sleep(Duration::from_millis(16));
-                    let (Ok(c), Ok(p)) = (win.cursor_position(), win.outer_position()) else { continue };
+                    thread::sleep(Duration::from_millis(8));
+                    n += 1;
+                    let (c, p) = match (win.cursor_position(), win.outer_position()) {
+                        (Ok(c), Ok(p)) => (c, p),
+                        (a, b) => { if n % 120 == 0 { println!("[rust] cursor/outer error: {:?} {:?}", a.err(), b.err()); } continue; }
+                    };
                     let s = win.scale_factor().unwrap_or(1.0);
                     let (x, y) = ((c.x - p.x as f64) / s, (c.y - p.y as f64) / s);
                     let (r, dragging) = { let g = shared.lock().unwrap(); (g.r, g.dragging) };
                     let pad = 10.0;
                     let inside = r[2] > 0.0 && x >= r[0] - pad && x <= r[0] + r[2] + pad && y >= r[1] - pad && y <= r[1] + r[3] + pad;
-                    let want = inside || dragging;
-                    if want != interactive { interactive = want; let _ = win.set_ignore_cursor_events(!want); }
-                    if inside != hovered { hovered = inside; let _ = handle.emit("hover", inside); }
+                    let down = lbutton();
+                    if n % 120 == 0 { println!("[rust] cursor=({:.0},{:.0}) rect={:?} inside={} down={} scale={}", x, y, r, inside, down, s); }
+                    let st = (x as i64, y as i64, down, inside);
+                    if (inside || dragging || down || hovered) && st != last {
+                        last = st;
+                        let _ = handle.emit("ptr", serde_json::json!({ "x": x, "y": y, "down": down, "inside": inside }));
+                    }
+                    hovered = inside;
                 }
             });
             Ok(())
