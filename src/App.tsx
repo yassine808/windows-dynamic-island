@@ -15,7 +15,7 @@ if (TAURI) {
   dbg(`boot ${innerWidth}x${innerHeight} dpr=${devicePixelRatio}`);
 }
 const call = (c: string, a?: Record<string, unknown>) => (TAURI ? invoke(c, a) : Promise.resolve(null));
-const GAP = 10;
+type Rect = { x: number; y: number; w: number; h: number };
 const spring = { type: "spring", stiffness: 380, damping: 28, mass: 0.9 } as const;
 const move = { type: "spring", stiffness: 260, damping: 22, mass: 1 } as const;
 
@@ -27,15 +27,16 @@ function sizeOf(m: Mode, v: boolean, peek: boolean) {
   return { w: 370, h: 162, r: 44 };
 }
 
-function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boolean) {
-  const W = innerWidth, H = innerHeight, horiz = e === "top" || e === "bottom";
-  const gap = tucked ? -(horiz ? s.h : s.w) * 0.6 : GAP;
+function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boolean, m: Rect) {
+  const horiz = e === "top" || e === "bottom";
+  const gap = tucked ? -(horiz ? s.h : s.w) * 0.6 : 0; // flush with the edge
   const half = (horiz ? s.w : s.h) / 2 + 12;
-  const a = Math.min(Math.max(along, half), (horiz ? W : H) - half);
-  if (e === "top") return { ex: a, ey: gap, fx: 0.5, fy: 0 };
-  if (e === "bottom") return { ex: a, ey: H - gap, fx: 0.5, fy: 1 };
-  if (e === "left") return { ex: gap, ey: a, fx: 0, fy: 0.5 };
-  return { ex: W - gap, ey: a, fx: 1, fy: 0.5 };
+  const lo = (horiz ? m.x : m.y) + half, hi = (horiz ? m.x + m.w : m.y + m.h) - half;
+  const a = Math.min(Math.max(along, lo), hi);
+  if (e === "top") return { ex: a, ey: m.y + gap, fx: 0.5, fy: 0 };
+  if (e === "bottom") return { ex: a, ey: m.y + m.h - gap, fx: 0.5, fy: 1 };
+  if (e === "left") return { ex: m.x + gap, ey: a, fx: 0, fy: 0.5 };
+  return { ex: m.x + m.w - gap, ey: a, fx: 1, fy: 0.5 };
 }
 
 const demoArt = "data:image/svg+xml;utf8," + encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop stop-color='#ff375f'/><stop offset='1' stop-color='#5e5ce6'/></linearGradient></defs><rect width='64' height='64' fill='url(#g)'/></svg>`);
@@ -149,10 +150,22 @@ export default function App() {
   const [nonce, setNonce] = useState(0);
   const along = useRef(innerWidth / 2);
   const level = useMotionValue(0);
+  const mons = useRef<Rect[]>([{ x: 0, y: 0, w: innerWidth, h: innerHeight }]);
+  const monRef = useRef<Rect>(mons.current[0]);
+  const edgeRef = useRef<Edge>("top");
+  edgeRef.current = edge;
+  const flat = useMotionValue(1);
 
-  const ex = useMotionValue(innerWidth / 2), ey = useMotionValue(GAP);
+  const ex = useMotionValue(innerWidth / 2), ey = useMotionValue(0);
   const fx = useMotionValue(0.5), fy = useMotionValue(0);
   const w = useMotionValue(126), h = useMotionValue(37), r = useMotionValue(18.5), lift = useMotionValue(1);
+  const rad = useTransform([r, flat], (v: number[]) => {
+    const o = v[0] * (1 - v[1]), i = v[0], e = edgeRef.current;
+    if (e === "top") return `${o}px ${o}px ${i}px ${i}px`;
+    if (e === "bottom") return `${i}px ${i}px ${o}px ${o}px`;
+    if (e === "left") return `${o}px ${i}px ${i}px ${o}px`;
+    return `${i}px ${o}px ${o}px ${i}px`;
+  });
   const x = useTransform([ex, w, fx], (v: number[]) => v[0] - v[1] * v[2]);
   const y = useTransform([ey, h, fy], (v: number[]) => v[0] - v[1] * v[2]);
 
@@ -177,11 +190,11 @@ export default function App() {
   useEffect(() => {
     if (dragging) return;
     const s = sizeOf(mode, vertical, hover);
-    const t = target(edge, along.current, s, tucked);
+    const t = target(edge, along.current, s, tucked, monRef.current);
     animate(w, s.w, spring); animate(h, s.h, spring); animate(r, s.r, spring);
     animate(ex, t.ex, move); animate(ey, t.ey, move);
     animate(fx, t.fx, move); animate(fy, t.fy, move);
-    animate(lift, 1, move);
+    animate(lift, 1, move); animate(flat, 1, spring);
   }, [edge, mode, hover, tucked, dragging, nonce]);
 
   // tuck into the edge when idle (not on top)
@@ -219,7 +232,7 @@ export default function App() {
       s.on = true;
       const lx = x.get(), ly = y.get();
       fx.set(0); fy.set(0); ex.set(lx); ey.set(ly);
-      animate(lift, 1.06, spring);
+      animate(lift, 1.06, spring); animate(flat, 0, spring);
       setDragging(true);
       call("set_dragging", { on: true });
     }
@@ -234,12 +247,16 @@ export default function App() {
     d.current = null;
     if (!s?.on) return;
     call("set_dragging", { on: false });
-    const W = innerWidth, H = innerHeight;
-    const px = ex.get() + w.get() / 2 + s.vx * 0.15, py = ey.get() + h.get() / 2 + s.vy * 0.15;
-    const dist: Record<Edge, number> = { top: py, bottom: H - py, left: px, right: W - px };
+    const cx = ex.get() + w.get() / 2, cy = ey.get() + h.get() / 2;
+    const px = cx + s.vx * 0.15, py = cy + s.vy * 0.15;
+    const list = mons.current;
+    const m = list.find((q) => cx >= q.x && cx < q.x + q.w && cy >= q.y && cy < q.y + q.h) ||
+      list.reduce((a, q) => (Math.hypot(cx - (q.x + q.w / 2), cy - (q.y + q.h / 2)) < Math.hypot(cx - (a.x + a.w / 2), cy - (a.y + a.h / 2)) ? q : a));
+    monRef.current = m;
+    const dist: Record<Edge, number> = { top: py - m.y, bottom: m.y + m.h - py, left: px - m.x, right: m.x + m.w - px };
     const e = (Object.keys(dist) as Edge[]).reduce((a, b) => (dist[a] < dist[b] ? a : b));
     let a = e === "top" || e === "bottom" ? px : py;
-    const mid = e === "top" || e === "bottom" ? W / 2 : H / 2;
+    const mid = e === "top" || e === "bottom" ? m.x + m.w / 2 : m.y + m.h / 2;
     if (Math.abs(a - mid) < 48) a = mid; // magnetic center
     along.current = a;
     setEdge(e); setDragging(false); setNonce((n) => n + 1);
@@ -297,35 +314,34 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  // keep position proportional when the overlay window gets resized to the monitor
+  // all monitors (the overlay spans them), primary first
   useEffect(() => {
-    let lw = innerWidth, lh = innerHeight;
-    const on = () => {
-      const horiz = edge === "top" || edge === "bottom";
-      along.current *= horiz ? innerWidth / lw : innerHeight / lh;
-      lw = innerWidth; lh = innerHeight;
+    if (!TAURI) return;
+    invoke<number[][]>("get_monitors").then((l) => {
+      if (!l.length) return;
+      mons.current = l.map(([x, y, w, h]) => ({ x, y, w, h }));
+      monRef.current = mons.current[0];
+      along.current = mons.current[0].x + mons.current[0].w / 2;
       setNonce((n) => n + 1);
-    };
-    addEventListener("resize", on);
-    return () => removeEventListener("resize", on);
-  }, [edge]);
+    });
+  }, []);
 
   const control = (action: string) => {
     if (!TAURI && media) setMedia({ ...media, playing: action === "toggle" ? !media.playing : media.playing });
     call("media_control", { action });
   };
-  const artEl = (big = false) => <div className={`art ${big ? "big" : ""}`} style={{ backgroundImage: art ? `url(${art})` : undefined, boxShadow: big && tint ? `0 6px 18px ${tint}66` : undefined }} />;
+  const artEl = (big = false) => <div className={`art ${big ? "big" : ""}`} style={{ backgroundImage: art ? `url(${art})` : undefined }} />;
 
-  const box = { x, y, width: w, height: h, scale: lift };
   const siri = mode === "listening";
+  const box = { x, y, width: w, height: h, scale: lift };
   return (
     <div className="stage">
-      <motion.div className="glow" style={{ ...box, borderRadius: r }} animate={{ opacity: siri ? 0.9 : tint && media ? (mode === "expanded" ? 0.5 : 0.3) : 0 }} transition={{ duration: 0.5 }}>
+      <motion.div className="glow" style={{ ...box, borderRadius: rad }} animate={{ opacity: siri ? 0.35 : tint && media ? (mode === "expanded" ? 0.16 : 0.1) : 0 }} transition={{ duration: 0.6 }}>
         <div className={`halo ${siri ? "siri" : ""}`} style={{ background: siri ? undefined : tint }} />
       </motion.div>
       <motion.div
         className={`island ${dragging ? "dragging" : ""}`}
-        style={{ ...box, borderRadius: r }}
+        style={{ ...box, borderRadius: rad }}
         onPointerDown={down} onPointerMove={mv} onPointerUp={up} onPointerCancel={up}
         onPointerEnter={() => !TAURI && setHover(true)} onPointerLeave={() => !TAURI && setHover(false)}
       >
