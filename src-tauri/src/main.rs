@@ -35,9 +35,9 @@ fn cursor_rel(_: isize) -> Option<(f64, f64)> { None }
 fn set_hit_rect(st: State<Shared>, x: f64, y: f64, w: f64, h: f64) { st.lock().unwrap().r = [x, y, w, h]; }
 
 #[tauri::command]
-fn get_ptr(st: State<Shared>) -> serde_json::Value {
+async fn get_ptr(st: State<'_, Shared>) -> Result<serde_json::Value, ()> {
     let p = st.lock().unwrap().p;
-    serde_json::json!({ "x": p.0, "y": p.1, "down": p.2, "inside": p.3 })
+    Ok(serde_json::json!({ "x": p.0, "y": p.1, "down": p.2, "inside": p.3 }))
 }
 
 #[tauri::command]
@@ -86,7 +86,7 @@ fn main() {
                         continue;
                     };
                     let (x, y) = (px / scale, py / scale);
-                    let (r, dragging) = { let g = shared.lock().unwrap(); (g.r, g.dragging) };
+                    let r = shared.lock().unwrap().r;
                     let pad = 10.0;
                     let inside = r[2] > 0.0 && x >= r[0] - pad && x <= r[0] + r[2] + pad && y >= r[1] - pad && y <= r[1] + r[3] + pad;
                     let down = lbutton();

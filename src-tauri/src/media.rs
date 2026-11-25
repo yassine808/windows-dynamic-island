@@ -64,11 +64,18 @@ mod imp {
     pub fn control(_: &str) {}
 }
 
+// async commands run off the main thread; WinRT .get() on the UI thread can deadlock it.
 #[tauri::command]
-pub fn media_poll() -> Option<MediaInfo> { imp::poll() }
+pub async fn media_poll() -> Option<MediaInfo> {
+    tauri::async_runtime::spawn_blocking(imp::poll).await.ok().flatten()
+}
 
 #[tauri::command]
-pub fn media_art() -> Option<String> { imp::art() }
+pub async fn media_art() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(imp::art).await.ok().flatten()
+}
 
 #[tauri::command]
-pub fn media_control(action: String) { imp::control(&action) }
+pub async fn media_control(action: String) {
+    let _ = tauri::async_runtime::spawn_blocking(move || imp::control(&action)).await;
+}
