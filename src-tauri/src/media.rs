@@ -6,6 +6,8 @@ pub struct MediaInfo {
     pub title: String,
     pub artist: String,
     pub playing: bool,
+    pub position: i64,
+    pub duration: i64,
 }
 
 #[cfg(windows)]
@@ -30,7 +32,12 @@ mod imp {
             return None;
         }
         let playing = s.GetPlaybackInfo().ok()?.PlaybackStatus().ok()? == Status::Playing;
-        Some(MediaInfo { title, artist: p.Artist().map(|a| a.to_string()).unwrap_or_default(), playing })
+        let ms = |d: windows::Foundation::TimeSpan| d.Duration / 10_000;
+        let (position, duration) = s.GetTimelineProperties().ok().map(|t| {
+            let st = t.StartTime().map(ms).unwrap_or(0);
+            (t.Position().map(ms).unwrap_or(0) - st, t.EndTime().map(ms).unwrap_or(0) - st)
+        }).unwrap_or((0, 0));
+        Some(MediaInfo { title, artist: p.Artist().map(|a| a.to_string()).unwrap_or_default(), playing, position, duration })
     }
 
     pub fn art() -> Option<String> {

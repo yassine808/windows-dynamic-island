@@ -1,30 +1,25 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { AnimatePresence, animate, motion, MotionValue, useMotionValue, useTransform } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
-type Media = { title: string; artist: string; playing: boolean } | null;
+type Media = { title: string; artist: string; playing: boolean; position: number; duration: number; at: number } | null;
+type Stt = { active: boolean; partial: string; text: string; err: string };
 type Mode = "idle" | "media" | "listening" | "expanded";
 type Edge = "top" | "bottom" | "left" | "right";
+type Rect = { x: number; y: number; w: number; h: number };
+type P = { x: number; y: number; down: boolean; inside: boolean };
 
 const TAURI = "__TAURI_INTERNALS__" in window;
 const dbg = (m: string) => TAURI && invoke("log", { msg: m });
-if (TAURI) {
-  addEventListener("error", (e) => dbg("error: " + e.message));
-  addEventListener("unhandledrejection", (e) => dbg("reject: " + String(e.reason)));
-  dbg(`boot ${innerWidth}x${innerHeight} dpr=${devicePixelRatio}`);
-}
 const call = (c: string, a?: Record<string, unknown>) => (TAURI ? invoke(c, a) : Promise.resolve(null));
-type Rect = { x: number; y: number; w: number; h: number };
 const spring = { type: "spring", stiffness: 380, damping: 28, mass: 0.9 } as const;
 const move = { type: "spring", stiffness: 260, damping: 22, mass: 1 } as const;
 
-// iOS Dynamic Island metrics (pt): pill 126x37, expanded 370x162
 function sizeOf(m: Mode, v: boolean, peek: boolean) {
   if (m === "idle") return peek ? (v ? { w: 44, h: 150, r: 22 } : { w: 150, h: 44, r: 22 }) : v ? { w: 37, h: 126, r: 18.5 } : { w: 126, h: 37, r: 18.5 };
   if (m === "media") return v ? { w: 37, h: 170, r: 18.5 } : { w: 250, h: 37, r: 18.5 };
   if (m === "listening") return { w: 340, h: 84, r: 42 };
-  return { w: 370, h: 162, r: 44 };
+  return { w: 370, h: 190, r: 44 };
 }
 
 function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boolean, m: Rect) {
@@ -42,15 +37,15 @@ function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boo
 const demoArt = "data:image/svg+xml;utf8," + encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop stop-color='#ff375f'/><stop offset='1' stop-color='#5e5ce6'/></linearGradient></defs><rect width='64' height='64' fill='url(#g)'/></svg>`);
 
 function useMedia() {
-  const [media, setMedia] = useState<Media>(TAURI ? null : { title: "Blinding Lights", artist: "The Weeknd", playing: true });
+  const [media, setMedia] = useState<Media>(TAURI ? null : { title: "Blinding Lights", artist: "The Weeknd", playing: true, position: 42000, duration: 215000, at: performance.now() });
   const [art, setArt] = useState<string | null>(TAURI ? null : demoArt);
   const last = useRef("");
   useEffect(() => {
     if (!TAURI) return;
     const tick = async () => {
       try {
-        const m = (await invoke<Media>("media_poll")) as Media;
-        setMedia(m);
+        const m = await invoke<Omit<NonNullable<Media>, "at"> | null>("media_poll");
+        setMedia(m ? { ...m, at: performance.now() } : null);
         const k = m ? `${m.title}|${m.artist}` : "";
         if (k !== last.current) {
           last.current = k;
@@ -89,6 +84,27 @@ function useTint(art: string | null) {
   return tint;
 }
 
+function useStt() {
+  const [stt, setStt] = useState<Stt>({ active: false, partial: "", text: "", err: "" });
+  const last = useRef("");
+  useEffect(() => {
+    if (!TAURI) return;
+    let busy = false;
+    const id = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const s = await invoke<Stt>("stt_state");
+        const k = JSON.stringify(s);
+        if (k !== last.current) { last.current = k; setStt(s); }
+      } catch {}
+      busy = false;
+    }, 100);
+    return () => clearInterval(id);
+  }, []);
+  return { stt, setStt };
+}
+
 function useMic(active: boolean, level: MotionValue<number>) {
   useEffect(() => {
     if (!active) return level.set(0);
@@ -113,37 +129,77 @@ function useMic(active: boolean, level: MotionValue<number>) {
   }, [active]);
 }
 
+// iOS "waveform" glyph: five rounded bars, tallest in the middle
+const PROFILE = [0.42, 0.72, 1, 0.72, 0.42];
+const GAIN = [0.9, 1.5, 2, 1.5, 0.9];
 const Bar = ({ level, k }: { level: MotionValue<number>; k: number }) => {
   const s = useTransform(level, (v) => Math.min(1, 0.2 + v * k));
   return <motion.i style={{ scaleY: s }} />;
 };
 const Bars = ({ playing, level }: { playing: boolean; level?: MotionValue<number> }) =>
   level ? (
-    <div className="bars">{[1.2, 2, 1.6, 0.9].map((k, i) => <Bar key={i} level={level} k={k} />)}</div>
+    <div className="bars">{GAIN.map((k, i) => <Bar key={i} level={level} k={k} />)}</div>
   ) : (
-    <div className={`bars ${playing ? "live" : "paused"}`}><i /><i /><i /><i /></div>
+    <div className={`bars ${playing ? "live" : "paused"}`}>
+      {PROFILE.map((h, i) => <i key={i} style={{ "--h": h } as CSSProperties} />)}
+    </div>
   );
 
+const fmt = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+function Progress({ m }: { m: NonNullable<Media> }) {
+  const [, f] = useState(0);
+  useEffect(() => { const id = setInterval(() => f((n) => n + 1), 250); return () => clearInterval(id); }, []);
+  const d = m.duration;
+  const pos = Math.min(d || 1e12, m.position + (m.playing ? performance.now() - m.at : 0));
+  return (
+    <div className="prog">
+      <span>{fmt(pos)}</span>
+      <div className="track"><b style={{ width: d ? `${Math.min(100, (pos / d) * 100)}%` : "0%" }} /></div>
+      <span>-{fmt(d ? d - pos : 0)}</span>
+    </div>
+  );
+}
+
+// SF Symbols, as drawn in the iOS Dynamic Island: backward.end.fill / pause.fill / play.fill / forward.end.fill
+const Skip = ({ flip }: { flip?: boolean }) => (
+  <svg width="16" height="15" viewBox="0 0 31 29" fill="currentColor">
+    <g transform={flip ? "translate(31 0) scale(-1 1)" : undefined}>
+      <rect x="0" y="0" width="5.8" height="29" rx="2.2" />
+      <path d="M29.5 2.2V26.8L11.8 14.5z" stroke="currentColor" strokeWidth="3" strokeLinejoin="round" />
+    </g>
+  </svg>
+);
 const Icon = {
-  prev: <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM9.5 12 18 6v12z" /></svg>,
-  next: <svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM6 18V6l8.5 6z" /></svg>,
-  play: <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>,
-  pause: <svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z" /></svg>,
-  mic: <svg viewBox="0 0 24 24" width="18" height="18" fill="#fff"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z" /></svg>,
+  prev: <Skip />,
+  next: <Skip flip />,
+  play: <svg width="15" height="17.5" viewBox="0 0 30 35" fill="currentColor"><path d="M5.5 5.2V29.8L25.8 17.5z" stroke="currentColor" strokeWidth="4.4" strokeLinejoin="round" /></svg>,
+  pause: <svg width="15" height="17.5" viewBox="0 0 30 35" fill="currentColor"><rect x="0" y="0" width="10.8" height="35" rx="2.8" /><rect x="19.2" y="0" width="10.8" height="35" rx="2.8" /></svg>,
+  mic: <svg viewBox="0 0 24 24" width="20" height="20" fill="#fff"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z" /></svg>,
 };
 
-const fade = {
-  initial: { opacity: 0, filter: "blur(10px)", scale: 0.85 },
-  animate: { opacity: 1, filter: "blur(0px)", scale: 1, transition: { duration: 0.32, delay: 0.08 } },
-  exit: { opacity: 0, filter: "blur(10px)", scale: 0.85, transition: { duration: 0.14 } },
+// play <-> pause morph, like SF Symbols' content transition
+const glyphV = {
+  initial: { scale: 0.55, opacity: 0, filter: "blur(4px)" },
+  animate: { scale: 1, opacity: 1, filter: "blur(0px)", transition: { duration: 0.22, ease: [0.2, 0.8, 0.2, 1] } },
+  exit: { scale: 0.55, opacity: 0, filter: "blur(4px)", transition: { duration: 0.14 } },
+} as const;
+
+// show the elapsed / remaining scrubber on the Media page (the iOS 17 layout). false = art, title and controls only
+const SCRUBBER = true;
+
+const pageV = {
+  initial: (d: number) => ({ opacity: 0, filter: "blur(10px)", y: d * 28, scale: 0.9 }),
+  animate: { opacity: 1, filter: "blur(0px)", y: 0, scale: 1, transition: { duration: 0.35, delay: 0.07 } },
+  exit: (d: number) => ({ opacity: 0, filter: "blur(10px)", y: -d * 28, scale: 0.9, transition: { duration: 0.15 } }),
 };
 
 export default function App() {
   const { media, art, setMedia } = useMedia();
   const tint = useTint(art);
-  const [listening, setListening] = useState(false);
+  const { stt, setStt } = useStt();
+  const [page, setPage] = useState(0);
+  const [dir, setDir] = useState(0);
   const [hover, setHover] = useState(false);
-  const [text, setText] = useState("");
   const [edge, setEdge] = useState<Edge>("top");
   const [tucked, setTucked] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -154,11 +210,10 @@ export default function App() {
   const monRef = useRef<Rect>(mons.current[0]);
   const edgeRef = useRef<Edge>("top");
   edgeRef.current = edge;
-  const flat = useMotionValue(1);
 
   const ex = useMotionValue(innerWidth / 2), ey = useMotionValue(0);
   const fx = useMotionValue(0.5), fy = useMotionValue(0);
-  const w = useMotionValue(126), h = useMotionValue(37), r = useMotionValue(18.5), lift = useMotionValue(1);
+  const w = useMotionValue(126), h = useMotionValue(37), r = useMotionValue(18.5), lift = useMotionValue(1), flat = useMotionValue(1);
   const rad = useTransform([r, flat], (v: number[]) => {
     const o = v[0] * (1 - v[1]), i = v[0], e = edgeRef.current;
     if (e === "top") return `${o}px ${o}px ${i}px ${i}px`;
@@ -166,25 +221,35 @@ export default function App() {
     if (e === "left") return `${o}px ${i}px ${i}px ${o}px`;
     return `${i}px ${o}px ${o}px ${i}px`;
   });
+  const ear = useTransform(r, (v) => `${(v * 0.36).toFixed(2)}px`);
   const x = useTransform([ex, w, fx], (v: number[]) => v[0] - v[1] * v[2]);
   const y = useTransform([ey, h, fy], (v: number[]) => v[0] - v[1] * v[2]);
 
-  useMic(listening, level);
+  useMic(stt.active, level);
 
   const vertical = edge === "left" || edge === "right";
-  const mode: Mode = listening ? "listening" : media && hover && !dragging ? "expanded" : media ? "media" : "idle";
+  const expanded = hover && !dragging && (!!media || page === 1);
+  const mode: Mode = expanded ? "expanded" : stt.active ? "listening" : media ? "media" : "idle";
+  const full = (stt.text + " " + stt.partial).trim();
+  const done = stt.text.split(/\s+/).filter(Boolean), live = stt.partial.split(/\s+/).filter(Boolean);
+  const toggleStt = () => (TAURI ? call("stt_toggle") : setStt((s) => ({ ...s, active: !s.active, text: s.active ? s.text : "", partial: s.active ? "" : "Dictation preview, words appear as you speak" })));
 
-  // events: hover from Rust (window is click-through), toggle-listen, stt
-  useEffect(() => {
-    const toggle = () => { setListening((v) => !v); setText(""); };
-    const subs = [
-      listen("toggle-listen", toggle),
-      listen<string>("stt-partial", (e) => setText(e.payload)),
-    ];
-    const key = (e: KeyboardEvent) => e.ctrlKey && e.altKey && e.code === "Space" && toggle();
-    addEventListener("keydown", key);
-    return () => { subs.forEach((s) => s.then((f) => f())); removeEventListener("keydown", key); };
-  }, []);
+  useEffect(() => { if (stt.active) { setDir(0); setPage(1); } }, [stt.active]);
+
+  // mouse wheel switches pages
+  const wheel = useRef({ acc: 0, t: 0, last: 0 });
+  const onWheel = (e: React.WheelEvent) => {
+    const now = performance.now(), s = wheel.current;
+    if (now - s.last > 250) s.acc = 0;
+    s.last = now;
+    if (now - s.t < 450) return;
+    s.acc += e.deltaY;
+    if (Math.abs(s.acc) < 30) return;
+    const d = s.acc > 0 ? 1 : -1;
+    s.acc = 0; s.t = now;
+    setDir(d);
+    setPage((p) => Math.max(0, Math.min(1, p + d)));
+  };
 
   // spring everything to its target
   useEffect(() => {
@@ -200,16 +265,15 @@ export default function App() {
   // tuck into the edge when idle (not on top)
   useEffect(() => {
     setTucked(false);
-    if (edge === "top" || hover || dragging || listening) return;
+    if (edge === "top" || hover || dragging || stt.active) return;
     const id = setTimeout(() => setTucked(true), 2500);
     return () => clearTimeout(id);
-  }, [edge, hover, dragging, listening, nonce]);
+  }, [edge, hover, dragging, stt.active, nonce]);
 
   // report hit rect so Rust can toggle click-through
   useEffect(() => {
     if (!TAURI) return;
     let last = "";
-    dbg("hit-rect loop started");
     const id = setInterval(() => {
       const s = lift.get(), cw = w.get() * s, ch = h.get() * s;
       const px = x.get() - (cw - w.get()) / 2, py = y.get() - (ch - h.get()) / 2;
@@ -261,7 +325,6 @@ export default function App() {
     along.current = a;
     setEdge(e); setDragging(false); setNonce((n) => n + 1);
   };
-
   const fn = useRef({ pdown, pmove, pup });
   fn.current = { pdown, pmove, pup };
 
@@ -274,41 +337,34 @@ export default function App() {
   const mv = (e: React.PointerEvent) => !TAURI && pmove(e.clientX, e.clientY);
   const up = () => !TAURI && pup();
 
-  // Tauri: Rust reads the mouse (window stays click-through) and sends it here
+  // Tauri: Rust reads the mouse (window stays click-through elsewhere); we poll it
   useEffect(() => {
     if (!TAURI) return;
     let active = false, btn: HTMLElement | null = null;
-    type P = { x: number; y: number; down: boolean; inside: boolean };
-    const onPtr = (e: { payload: P }) => {
-      const { x: px, y: py, down: dn, inside } = e.payload;
+    const onPtr = (p: P) => {
+      if (!d.current?.on) setHover(p.inside);
       const f = fn.current;
-      if (!d.current?.on) setHover(inside);
-      if (dn && !active) {
-        if (!inside) return;
+      if (p.down && !active) {
+        if (!p.inside) return;
         active = true;
-        dbg(`press ${px | 0},${py | 0}`);
-        btn = document.elementFromPoint(px, py)?.closest("button") as HTMLElement | null;
-        if (!btn) f.pdown(px, py);
-      } else if (dn && active) {
-        if (!btn) f.pmove(px, py);
-      } else if (!dn && active) {
+        btn = document.elementFromPoint(p.x, p.y)?.closest("button") as HTMLElement | null;
+        if (btn) btn.classList.add("pressed"); else f.pdown(p.x, p.y);
+      } else if (p.down && active) {
+        if (!btn) f.pmove(p.x, p.y);
+      } else if (!p.down && active) {
         active = false;
         if (btn) {
-          if (document.elementFromPoint(px, py)?.closest("button") === btn) btn.click();
+          btn.classList.remove("pressed");
+          if (document.elementFromPoint(p.x, p.y)?.closest("button") === btn) btn.click();
           btn = null;
         } else f.pup();
       }
     };
-    let busy = false, n = 0;
-    dbg("ptr poll started, visibility=" + document.visibilityState);
+    let busy = false;
     const id = setInterval(async () => {
       if (busy) return;
       busy = true;
-      try {
-        const p = await invoke<P>("get_ptr");
-        if (++n % 150 === 1) dbg(`poll #${n} ${JSON.stringify(p)}`);
-        onPtr({ payload: p });
-      } catch (err) { dbg("get_ptr failed: " + String(err)); }
+      try { onPtr(await invoke<P>("get_ptr")); } catch (err) { dbg("get_ptr failed: " + String(err)); }
       busy = false;
     }, 16);
     return () => clearInterval(id);
@@ -330,51 +386,88 @@ export default function App() {
     if (!TAURI && media) setMedia({ ...media, playing: action === "toggle" ? !media.playing : media.playing });
     call("media_control", { action });
   };
-  const artEl = (big = false) => <div className={`art ${big ? "big" : ""}`} style={{ backgroundImage: art ? `url(${art})` : undefined }} />;
+  const artEl = (big = false) => <div className={`art ${big ? "big" : ""}`} style={{ backgroundImage: art ? `url("${art}")` : undefined }} />;
 
   const siri = mode === "listening";
   const box = { x, y, width: w, height: h, scale: lift };
+  const vp = { variants: pageV, initial: "initial", animate: "animate", exit: "exit" } as const;
   return (
-    <div className="stage">
+    <div className={`stage ${dragging ? "dragging" : ""}`} style={{ ["--accent" as string]: tint ? `color-mix(in srgb, ${tint} 55%, white)` : "#fff" }}>
       <motion.div className="glow" style={{ ...box, borderRadius: rad }} animate={{ opacity: siri ? 0.35 : tint && media ? (mode === "expanded" ? 0.16 : 0.1) : 0 }} transition={{ duration: 0.6 }}>
         <div className={`halo ${siri ? "siri" : ""}`} style={{ background: siri ? undefined : tint }} />
       </motion.div>
       <motion.div
-        className={`island ${dragging ? "dragging" : ""}`}
-        style={{ ...box, borderRadius: rad }}
-        onPointerDown={down} onPointerMove={mv} onPointerUp={up} onPointerCancel={up}
+        className="shell"
+        style={box}
+        onPointerDown={down} onPointerMove={mv} onPointerUp={up} onPointerCancel={up} onWheel={onWheel}
         onPointerEnter={() => !TAURI && setHover(true)} onPointerLeave={() => !TAURI && setHover(false)}
       >
-        <AnimatePresence mode="popLayout" initial={false}>
-          {mode === "media" && media && (
-            <motion.div key={"media" + vertical} className={`row ${vertical ? "v" : ""}`} {...fade}>
-              {artEl()}
-              {!vertical && <div className="col" />}
-              <Bars playing={media.playing} />
-            </motion.div>
-          )}
-          {mode === "listening" && (
-            <motion.div key="listening" className="row" style={{ padding: "0 20px" }} {...fade}>
-              <motion.div className="mic" animate={{ scale: [1, 1.08, 1] }} transition={{ repeat: Infinity, duration: 1.6 }}>{Icon.mic}</motion.div>
-              <div className="col"><div className="transcript">{text || <span className="hint">Listening…</span>}</div></div>
-              <Bars playing level={level} />
-            </motion.div>
-          )}
-          {mode === "expanded" && media && (
-            <motion.div key="expanded" className="row ex" {...fade}>
-              <div className="top">
-                {artEl(true)}
-                <div className="col"><div className="title">{media.title}</div><div className="artist">{media.artist}</div></div>
+        {/* concave fillets where the island meets the screen edge */}
+        <motion.div className={`ears e-${edge}`} style={{ opacity: flat, ["--ear" as string]: ear }}><i className="ear a" /><i className="ear b" /></motion.div>
+        <motion.div className="island" style={{ borderRadius: rad }}>
+          <AnimatePresence mode="popLayout" initial={false} custom={dir}>
+            {mode === "media" && media && (
+              <motion.div key={"media" + vertical} className={`row ${vertical ? "v" : ""}`} custom={0} {...vp}>
+                {artEl()}
+                {!vertical && <div className="col" />}
                 <Bars playing={media.playing} />
-              </div>
-              <div className="controls">
-                <motion.button whileTap={{ scale: 0.8 }} onClick={() => control("prev")}>{Icon.prev}</motion.button>
-                <motion.button whileTap={{ scale: 0.8 }} onClick={() => control("toggle")}>{media.playing ? Icon.pause : Icon.play}</motion.button>
-                <motion.button whileTap={{ scale: 0.8 }} onClick={() => control("next")}>{Icon.next}</motion.button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+              </motion.div>
+            )}
+            {mode === "listening" && (
+              <motion.div key="listening" className="row" style={{ padding: "0 20px" }} custom={0} {...vp}>
+                <motion.div className="mic" animate={{ scale: [1, 1.08, 1] }} transition={{ repeat: Infinity, duration: 1.6 }}>{Icon.mic}</motion.div>
+                <div className="col"><div className="tx sm">{full ? <div className="tw">{done.map((t, i) => <span key={"d" + i} className="w">{t} </span>)}{live.map((t, i) => <span key={"l" + i + t} className="w hint">{t} </span>)}</div> : <span className="hint">Listening…</span>}</div></div>
+                <Bars playing level={level} />
+              </motion.div>
+            )}
+            {mode === "expanded" && page === 0 && (
+              <motion.div key="ex0" className="row ex" custom={dir} {...vp}>
+                {media ? (
+                  <>
+                    <div className="top">
+                      {artEl(true)}
+                      <div className="col"><div className="title">{media.title}</div><div className="artist">{media.artist}</div></div>
+                      <Bars playing={media.playing} />
+                    </div>
+                    {SCRUBBER && <Progress m={media} />}
+                    <div className="controls">
+                      <button aria-label="Previous" onClick={() => control("prev")}>{Icon.prev}</button>
+                      <button aria-label={media.playing ? "Pause" : "Play"} onClick={() => control("toggle")}>
+                        <AnimatePresence mode="popLayout" initial={false}>
+                          <motion.span key={media.playing ? "pause" : "play"} className="glyph" {...glyphV}>{media.playing ? Icon.pause : Icon.play}</motion.span>
+                        </AnimatePresence>
+                      </button>
+                      <button aria-label="Next" onClick={() => control("next")}>{Icon.next}</button>
+                    </div>
+                  </>
+                ) : <div className="hint empty">Nothing playing</div>}
+              </motion.div>
+            )}
+            {mode === "expanded" && page === 1 && (
+              <motion.div key="ex1" className="row ex" custom={dir} {...vp}>
+                <div className="top">
+                  <button className={`micbtn ${stt.active ? "on" : ""}`} onClick={toggleStt}>{Icon.mic}</button>
+                  <div className="col">
+                    <div className="title">Dictation</div>
+                    <div className="artist">{stt.err || (stt.active ? "Listening…" : "Tap to dictate")}</div>
+                  </div>
+                  <Bars playing={stt.active} level={stt.active ? level : undefined} />
+                </div>
+                <div className="tx">
+                  {full ? (
+                    <div className="tw">
+                      {done.map((t, i) => <span key={"d" + i} className="w">{t} </span>)}
+                      {live.map((t, i) => <span key={"l" + i + t} className="w hint">{t} </span>)}
+                    </div>
+                  ) : <span className="hint">{stt.active ? "Listening… start speaking" : "Tap the mic or press Ctrl+Alt+Space, then speak. Words appear here live and are typed into the text field you have selected."}</span>}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          <motion.div className="dots" initial={false} animate={{ opacity: mode === "expanded" ? 1 : 0 }}>
+            <i className={page === 0 ? "on" : ""} /><i className={page === 1 ? "on" : ""} />
+          </motion.div>
+        </motion.div>
       </motion.div>
     </div>
   );

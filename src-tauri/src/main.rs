@@ -1,9 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod media;
+mod stt;
 
 use std::{sync::{Arc, Mutex}, thread, time::Duration};
-use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
+use tauri::{Manager, PhysicalPosition, PhysicalSize, State};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[derive(Default)]
@@ -54,14 +55,14 @@ fn main() {
     tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _sc, ev| {
-                    if ev.state() == ShortcutState::Pressed { let _ = app.emit("toggle-listen", ()); }
+                .with_handler(|_app, _sc, ev| {
+                    if ev.state() == ShortcutState::Pressed { stt::toggle(); }
                 })
                 .build(),
         )
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
-            media::media_poll, media::media_art, media::media_control, set_hit_rect, set_dragging, log, get_ptr, get_monitors
+            media::media_poll, media::media_art, media::media_control, set_hit_rect, set_dragging, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle
         ])
         .setup(move |app| {
             app.global_shortcut()

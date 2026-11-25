@@ -3,31 +3,37 @@
   --label-secondary: rgba(235, 235, 245, 0.6);
   --fill: rgba(120, 120, 128, 0.36);
   --red: #ff453a;
+  --ear: 16px;
   --font: "Inter Variable", "Segoe UI Variable", system-ui, sans-serif;
 }
 
-html, body, #root {
-  margin: 0;
-  height: 100%;
-  background: transparent;
-  overflow: hidden;
-  font-family: var(--font);
-  color: var(--label);
-  -webkit-font-smoothing: antialiased;
-  user-select: none;
-}
+html, body, #root { margin: 0; height: 100%; background: transparent; overflow: hidden; font-family: var(--font); color: var(--label); -webkit-font-smoothing: antialiased; user-select: none; }
 
 .stage { position: fixed; inset: 0; overflow: hidden; }
 
-.island {
-  position: absolute; left: 0; top: 0;
-  background: #000;
-  overflow: hidden;
-  cursor: grab;
-  touch-action: none;
-  transition: box-shadow 0.3s;
-}
-.island.dragging { cursor: grabbing; box-shadow: 0 22px 50px rgba(0, 0, 0, 0.5); }
+.shell { position: absolute; left: 0; top: 0; touch-action: none; }
+.stage, .stage * { cursor: default; }
+.stage.dragging, .stage.dragging * { cursor: grabbing; }
+.island { position: absolute; inset: 0; background: #000; overflow: hidden; transition: box-shadow 0.3s; }
+.stage.dragging .island { box-shadow: 0 22px 50px rgba(0, 0, 0, 0.5); }
+
+/* concave fillets: where the island meets the screen edge it flares out (like iOS) instead of a hard 90 degrees.
+   --ear is set from the island's corner radius. Each ear also gets a 1px black strip tucked under the island so no hairline shows. */
+.ears { position: absolute; inset: 0; pointer-events: none; }
+.ear { position: absolute; width: var(--ear); height: var(--ear); background: radial-gradient(circle at var(--cx) var(--cy), transparent calc(var(--ear) - 0.4px), #000 calc(var(--ear) + 0.4px)); }
+.ear::after { content: ""; position: absolute; background: #000; }
+.e-top .a, .e-bottom .a { right: 100%; --cx: 0; }
+.e-top .b, .e-bottom .b { left: 100%; --cx: 100%; }
+.e-top .ear { top: 0; --cy: 100%; }
+.e-bottom .ear { bottom: 0; --cy: 0; }
+.e-top .a::after, .e-bottom .a::after { left: 100%; top: 0; width: 1px; height: 100%; }
+.e-top .b::after, .e-bottom .b::after { right: 100%; top: 0; width: 1px; height: 100%; }
+.e-left .a, .e-right .a { bottom: 100%; --cy: 0; }
+.e-left .b, .e-right .b { top: 100%; --cy: 100%; }
+.e-left .ear { left: 0; --cx: 100%; }
+.e-right .ear { right: 0; --cx: 0; }
+.e-left .a::after, .e-right .a::after { top: 100%; left: 0; height: 1px; width: 100%; }
+.e-left .b::after, .e-right .b::after { bottom: 100%; left: 0; height: 1px; width: 100%; }
 
 .glow { position: absolute; left: 0; top: 0; pointer-events: none; }
 .halo { position: absolute; inset: -3px; border-radius: inherit; filter: blur(14px); transition: background 0.6s; }
@@ -37,32 +43,55 @@ html, body, #root {
 
 .row { position: absolute; inset: 0; display: flex; align-items: center; padding: 0 12px; gap: 10px; }
 .row.v { flex-direction: column; padding: 12px 0; justify-content: space-between; }
-.row.ex { flex-direction: column; align-items: stretch; justify-content: center; padding: 0 20px; gap: 12px; }
+.row.ex { flex-direction: column; align-items: stretch; justify-content: space-between; padding: 20px 20px 22px; gap: 0; }
+.empty { margin: auto; font-size: 15px; font-weight: 500; }
 .top { display: flex; gap: 14px; align-items: center; }
 .col { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 
 .art { width: 24px; height: 24px; border-radius: 6px; background: var(--fill) center / cover; flex: none; }
-.art.big { width: 64px; height: 64px; border-radius: 12px; }
+.art.big { width: 63px; height: 63px; border-radius: 12px; }
 
-.title { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.artist { font-size: 13px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.transcript { font-size: 15px; font-weight: 500; line-height: 1.25; max-height: 38px; overflow: hidden; }
+.title { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.artist { font-size: 14px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hint { color: var(--label-secondary); }
 
-.bars { display: flex; align-items: center; gap: 2px; height: 16px; flex: none; }
-.bars i { width: 3px; height: 100%; border-radius: 2px; background: #fff; transform-origin: center; }
+.bars { display: flex; align-items: center; gap: 2px; height: 15px; flex: none; }
+.bars i { --h: 1; width: 2.6px; height: 100%; border-radius: 2px; background: var(--accent, #fff); transform-origin: center; }
 .bars.live i { animation: bar 0.9s ease-in-out infinite; }
 .bars.live i:nth-child(2) { animation-delay: -0.3s; }
 .bars.live i:nth-child(3) { animation-delay: -0.6s; }
 .bars.live i:nth-child(4) { animation-delay: -0.15s; }
-.bars.paused i { transform: scaleY(0.2); }
-@keyframes bar { 0%, 100% { transform: scaleY(0.25); } 50% { transform: scaleY(1); } }
+.bars.live i:nth-child(5) { animation-delay: -0.45s; }
+.bars.paused i { transform: scaleY(calc(var(--h) * 0.4)); }
+@keyframes bar { 0%, 100% { transform: scaleY(calc(var(--h) * 0.3)); } 50% { transform: scaleY(var(--h)); } }
 
+/* progress, iOS style */
+.prog { display: flex; align-items: center; gap: 9px; font-size: 11px; font-weight: 600; color: var(--label-secondary); font-variant-numeric: tabular-nums; }
+.track { flex: 1; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.28); overflow: hidden; }
+.track b { display: block; height: 100%; background: #fff; border-radius: 3px; transition: width 0.25s linear; }
+
+/* transport controls: small white SF glyphs, centres 72px apart, no backgrounds (as on iOS) */
+.controls { display: flex; justify-content: center; align-items: center; }
+.controls button { position: relative; display: grid; place-items: center; width: 72px; height: 36px; padding: 0; border: 0; background: none; color: #fff; -webkit-tap-highlight-color: transparent; transition: transform 0.38s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.38s; }
+.controls button > svg, .controls .glyph { grid-area: 1 / 1; display: grid; place-items: center; }
+.controls .glyph { position: relative; }
+/* press: shrink + dim instantly, spring back with a little overshoot on release */
+.controls button.pressed, .controls button:active { transform: scale(0.84); opacity: 0.55; transition-duration: 0.08s; }
+.controls svg { display: block; }
+
+/* dictation */
 .mic { width: 36px; height: 36px; border-radius: 50%; background: var(--red); display: grid; place-items: center; flex: none; }
+.micbtn { width: 46px; height: 46px; border-radius: 50%; border: 0; background: var(--fill); display: grid; place-items: center; cursor: default; flex: none; transition: background 0.25s, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.micbtn.on { background: var(--red); }
+.micbtn.pressed, .micbtn:active { transform: scale(0.88); }
+.tx { flex: 1; min-height: 0; margin-top: 10px; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; font-size: 16px; line-height: 1.3; font-weight: 500; -webkit-mask-image: linear-gradient(to bottom, transparent, #000 35%); mask-image: linear-gradient(to bottom, transparent, #000 35%); }
+.tw { display: block; }
+.w { display: inline; animation: wordin 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes wordin { from { opacity: 0; filter: blur(4px); } to { opacity: 1; filter: blur(0); } }
+.tx.sm { margin: 0; font-size: 15px; max-height: 40px; line-height: 1.25; -webkit-mask-image: none; mask-image: none; }
 
-.controls { display: flex; justify-content: center; gap: 36px; }
-.controls button { background: none; border: 0; color: #fff; padding: 4px; cursor: pointer; transition: transform 0.15s; }
-.controls button:active { transform: scale(0.85); }
-.controls svg { width: 28px; height: 28px; fill: currentColor; display: block; }
+.dots { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 5px; pointer-events: none; }
+.dots i { width: 5px; height: 5px; border-radius: 50%; background: rgba(255, 255, 255, 0.3); transition: background 0.25s; }
+.dots i.on { background: #fff; }
 
-@media (prefers-reduced-motion: reduce) { .bars.live i { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .bars.live i { animation: none; } .w { animation: none; } }
