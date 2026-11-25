@@ -7,6 +7,7 @@
 - [x] Whisper STT (faster-whisper, local, offline)
 - [x] Paste transcript into focused window
 - [x] Verify end-to-end (SAPI speech → transcript)
+- [x] Restyle the island to ReUI's design system
 - [ ] Commit and push
 
 ## Log
@@ -34,4 +35,20 @@
   - Real launch: model ready in 2.2 s; simulated Right Ctrl hold produced `captured 1.28s` and a
     `no transcript: Nothing heard` on a silent mic — press/release/record/transcribe path works.
   - Screenshots of idle / listening / result captured into `docs/`.
+- Next: commit and push.
+
+### 2026-11-25 — ReUI design pass
+- Goal: restyle the island to match ocopus-labs/ReUI.
+- Done:
+  - Read ReUI `DESIGN.md` + `design/tokens.json` and mapped the tokens: black `#000000` capsule,
+    height 36.67 -> 37, top gap 11, concentric 24 art inset 6.33, text margin 12, bars 3 x 2.5 x 14 at 30 fps,
+    compact 15/20 semibold, detail 15/20, caption 12/16, labels #EBEBF0 / #8E8D94, red #FF453A,
+    green #30D158, default accent #0A84FF.
+  - `island.py` rewritten: no border, shadow, gradient or glow; one line of content; round marks are
+    24 px tinted circles; result shows a green check + elided transcript + "Pasted/Copied . N.Ns";
+    OutBack open / OutCubic close; idle has no loops.
+  - Dropped the filler hint "click to copy" (ReUI: no filler text).
+  - New default accent, config migrated, docs screenshots re-shot.
+- Verified: `--smoke` exit 0; real launch + simulated Right Ctrl -> recorded 1.09 s -> transcribed
+  (silent mic: "Nothing heard"); sizes idle 115, listen 250, think 196, result 430, error 420, all 37 high.
 - Next: commit and push.

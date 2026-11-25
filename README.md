@@ -3,9 +3,9 @@
 A Dynamic-Island-style pill at the top of the screen that turns your voice into text in any Windows app.
 **Hold a key, speak, release** — the transcript is pasted where your cursor was. Local Whisper, no cloud, no account.
 
-| Idle | Listening | Result |
-|---|---|---|
-| ![idle](docs/idle.png) | ![listening](docs/listening.png) | ![result](docs/result.png) |
+| Idle | Listening | Transcribing | Result |
+|---|---|---|---|
+| ![idle](docs/idle.png) | ![listening](docs/listening.png) | ![thinking](docs/thinking.png) | ![result](docs/result.png) |
 
 ## Why
 
@@ -13,6 +13,23 @@ There are a dozen Dynamic Island clones for Windows (see [Similar projects](#sim
 notification widgets: music, timers, clipboard, AI chat. None of them is built around **push-to-talk dictation**,
 which is the one thing this repo does. The island is the feedback surface — it tells you the mic is live, shows
 the level, then shows what it heard — and the actual job is getting clean text into the field you were typing in.
+
+## Design
+
+The look follows [ReUI](https://github.com/ocopus-labs/ReUI)'s design system (MIT/Apache-2.0), read from its
+`DESIGN.md` and `design/tokens.json`:
+
+- **A pure black capsule**, 37 px tall, 11 px below the top edge. No border, no shadow, no gradient, no
+  separators — hierarchy comes from type and colour only.
+- **Compact only.** Every state is the same pill, grown sideways; it never becomes a window.
+- **Concentric geometry.** Round marks are 24 px circles inset 6.33 px so they sit concentric with the pill's
+  end; text keeps a 12 px margin clear of the curve.
+- **One accent per state.** Red while recording (`#FF453A`), the user's accent while transcribing (ReUI blue
+  `#0A84FF` by default), system green when the text landed (`#30D158`).
+- **Type from the tokens**: Segoe UI Variable Text, `compact` 15/20 semibold, `detail` 15/20, `caption`
+  12/16 medium; labels `#EBEBF0` primary, `#8E8D94` secondary.
+- **Motion explains state**: an `OutBack` spring on open, `OutCubic` on close, bars at 30 fps. Nothing loops
+  while idle.
 
 ## Features
 
@@ -91,7 +108,7 @@ Switch in Settings. A new model loads in the background; the island shows progre
 | `beam_size` | `1` | 1 = greedy (fastest); 5 = a bit more accurate |
 | `paste_into_app` | `true` | Paste on release; when off, only the clipboard is filled |
 | `play_sounds` | `true` | Short cues on press / release / done |
-| `accent` | `"#5AC8FA"` | Waveform and border colour |
+| `accent` | `"#0A84FF"` | Waveform and border colour |
 | `min_seconds` | `0.35` | Ignore accidental taps |
 | `max_seconds` | `180` | Hard stop |
 | `show_hint` | `true` | Reserved |

@@ -18,7 +18,7 @@ DEFAULTS: dict = {
     "beam_size": 1,
     "paste_into_app": True,
     "play_sounds": True,
-    "accent": "#5AC8FA",
+    "accent": "#0A84FF",
     "min_seconds": 0.35,
     "max_seconds": 180,
     "show_hint": True,

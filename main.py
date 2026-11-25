@@ -205,7 +205,7 @@ class SttIslandApp:
             self.island.error("Nothing to copy yet")
             return
         QGuiApplication.clipboard().setText(self.last_text)
-        self.island.result(self.last_text, "Copied to clipboard", linger_ms=1800)
+        self.island.result(self.last_text, "Copied", linger_ms=1800)
 
     # ---------- recording ----------
 
@@ -282,7 +282,7 @@ class SttIslandApp:
                     pasted = True
             except Exception:  # noqa: BLE001
                 log.exception("paste failed")
-        sub = f"{'Pasted' if pasted else 'Copied'} · {took:.1f}s · click to copy"
+        sub = f"{'Pasted' if pasted else 'Copied'} · {took:.1f}s"
         self.island.result(text, sub)
         if self.cfg["play_sounds"]:
             sounds.done()
@@ -345,7 +345,7 @@ class SttIslandApp:
             elif action == "result":
                 self.island.result(
                     "Smoke test: the island grows, records and shows a transcript.",
-                    "Copied · 0.1s · click to copy",
+                    "Copied · 0.1s",
                     linger_ms=60_000,
                 )
             elif action == "quit":
