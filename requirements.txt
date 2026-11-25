@@ -1,0 +1,4 @@
+PySide6-Essentials>=6.6
+faster-whisper>=1.0
+sounddevice>=0.4.7
+numpy>=1.24
