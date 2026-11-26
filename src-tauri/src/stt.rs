@@ -47,8 +47,11 @@ pub fn stt_ended() {
 #[tauri::command]
 pub fn stt_type(text: String) -> Result<usize, String> {
     let out = if text.ends_with(' ') { text } else { format!("{text} ") };
-    logf!("stt", "type: {} chars from the browser engine", out.chars().count());
-    imp::type_out(&out)
+    let t = std::time::Instant::now();
+    let n = imp::type_out(&out)?;
+    // the benchmark script reads this line: keystroke cost for one finished phrase
+    logf!("stt", "type: {} chars in {:.1} ms", out.chars().count(), t.elapsed().as_secs_f64() * 1000.0);
+    Ok(n)
 }
 
 #[tauri::command]
@@ -233,8 +236,9 @@ mod imp {
                         logf!("stt", "result text: {t:?}");
                         if !t.trim().is_empty() {
                             let out = format!("{} ", t.trim());
+                            let started = std::time::Instant::now();
                             match type_text(&out) {
-                                Ok(n) => logf!("stt", "typed the phrase as {n} key events"),
+                                Ok(n) => logf!("stt", "typed the phrase as {n} key events in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0),
                                 Err(e) => logf!("stt", "typing failed: {e}"),
                             }
                             let mut s = STATE.lock().unwrap();

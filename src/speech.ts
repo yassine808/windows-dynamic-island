@@ -38,6 +38,8 @@ export function createSpeech(h: SpeechHandlers) {
   let restarts = 0;
   let startedAt = 0;
   let flapping = 0; // sessions that die within 400 ms of starting
+  // the log timestamps are enough to time a session; these only keep it to one "first words" line
+  let firstWord = false;
 
   rec.onstart = () => { startedAt = performance.now(); h.debug?.("engine started"); };
   rec.onaudiostart = () => h.debug?.("audio capture open");
@@ -49,6 +51,7 @@ export function createSpeech(h: SpeechHandlers) {
       const r = e.results[i];
       const t = String(r[0]?.transcript ?? "").trim();
       if (!t) continue;
+      if (!firstWord) { firstWord = true; h.debug?.("first words"); }
       if (r.isFinal) h.final(t);
       else interim = `${interim} ${t}`.trim();
     }
@@ -87,6 +90,7 @@ export function createSpeech(h: SpeechHandlers) {
     start() {
       if (dead) return;
       want = true;
+      firstWord = false;
       if (started) return;
       try { rec.start(); started = true; } catch {}
     },

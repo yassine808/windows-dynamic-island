@@ -140,6 +140,7 @@ function useStt() {
       .catch(() => dbg("stt: mic permission unknown"));
     if (!ok) return;
     let alive = true;
+    let reported = false; // the end callback can fire several times per session
     call("stt_engine", { browser: true });
     let rec = createSpeech({
       partial: (t) => {
@@ -160,11 +161,11 @@ function useStt() {
         if (!alive) return;
         setStt((s) => ({ ...s, err: msg, active: false, partial: "" }));
         call("stt_engine", { browser: false });
-        call("stt_ended");
         dbg(`stt: browser engine fell back (${msg})`);
       },
       end: () => {
-        if (!alive) return;
+        if (!alive || reported) return;
+        reported = true;
         setStt((s) => (s.active || s.partial ? { ...s, active: false, partial: "" } : s));
         call("stt_ended"); // keep the Rust state machine in sync when the engine stops by itself
       },
@@ -173,7 +174,7 @@ function useStt() {
     let gone = false;
     const offs: Array<() => void> = [];
     const sub = (p: Promise<() => void>) => p.then((f) => (gone ? f() : offs.push(f))).catch(() => {});
-    sub(listen("stt://start", () => { if (!alive) return; setStt((s) => ({ ...s, active: true, err: "" })); rec.start(); }));
+    sub(listen("stt://start", () => { if (!alive) return; reported = false; setStt((s) => ({ ...s, active: true, err: "" })); rec.start(); }));
     sub(listen("stt://stop", () => rec.stop()));
     return () => { alive = false; gone = true; rec.abort(); offs.forEach((f) => f()); };
   }, []);
