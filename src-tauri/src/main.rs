@@ -1,6 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// One line to the log file (logger.rs) and the console.
+macro_rules! logf {
+    ($tag:expr, $($arg:tt)*) => { crate::logger::write($tag, &format!($($arg)*)) };
+}
+
 mod hotkey;
+mod logger;
 mod media;
 mod stt;
 
@@ -83,20 +89,30 @@ async fn get_ptr(st: State<'_, Shared>) -> Result<serde_json::Value, ()> {
 async fn get_monitors(st: State<'_, Shared>) -> Result<Vec<[f64; 4]>, ()> { Ok(st.lock().unwrap().mons.clone()) }
 
 #[tauri::command]
-fn log(msg: String) { println!("[js] {msg}"); }
+fn log(msg: String) { logf!("js", "{msg}"); }
 
 #[tauri::command]
 fn set_dragging(st: State<Shared>, on: bool) { st.lock().unwrap().dragging = on; }
 
 fn main() {
+    logger::init();
+    std::panic::set_hook(Box::new(|info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        logf!("panic", "{info}\n{bt}");
+    }));
     let shared: Shared = Arc::new(Mutex::new(Hit::default()));
     tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|_app, _sc, ev| match ev.state() {
                     // hold = push-to-talk (listen while the key is down); otherwise press to start, press to stop
-                    ShortcutState::Pressed => if stt::hold() { stt::start() } else { stt::toggle() },
-                    ShortcutState::Released => if stt::hold() { stt::stop() },
+                    ShortcutState::Pressed => {
+                        logf!("hotkey", "shortcut pressed (hold={})", stt::hold());
+                        if stt::hold() { stt::start() } else { stt::toggle() }
+                    }
+                    ShortcutState::Released => {
+                        if stt::hold() { logf!("hotkey", "shortcut released (hold) -> stop"); stt::stop() }
+                    }
                 })
                 .build(),
         )
@@ -106,12 +122,16 @@ fn main() {
             hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::cancel_record_shortcut
         ])
         .setup(move |app| {
+            logf!("win", "setup: initialising the dictation shortcut");
             hotkey::init(app.handle());
 
             // Transparent overlay over the whole primary monitor; the island lives inside it.
             let win = app.get_webview_window("main").unwrap();
             // One transparent overlay spanning every monitor.
             let mons = win.available_monitors()?;
+            for m in &mons {
+                logf!("win", "monitor {}x{} at {},{} scale {:.2}", m.size().width, m.size().height, m.position().x, m.position().y, m.scale_factor());
+            }
             let prim = win.primary_monitor()?.map(|m| (m.position().x, m.position().y));
             let minx = mons.iter().map(|m| m.position().x).min().unwrap_or(0);
             let miny = mons.iter().map(|m| m.position().y).min().unwrap_or(0);
@@ -120,6 +140,7 @@ fn main() {
             win.set_position(PhysicalPosition::new(minx, miny))?;
             win.set_size(PhysicalSize::new((maxx - minx) as u32, (maxy - miny) as u32))?;
             let scale = win.scale_factor().unwrap_or(1.0);
+            logf!("win", "overlay {}x{} at {},{} (scale {:.2}, primary {prim:?})", maxx - minx, maxy - miny, minx, miny, scale);
             let mut list: Vec<([f64; 4], bool)> = mons.iter().map(|m| (
                 [(m.position().x - minx) as f64 / scale, (m.position().y - miny) as f64 / scale, m.size().width as f64 / scale, m.size().height as f64 / scale],
                 Some((m.position().x, m.position().y)) == prim,
@@ -131,7 +152,7 @@ fn main() {
             // Window stays fully click-through. Rust reads the mouse and forwards it to the UI.
             let hwnd = win.hwnd()?.0 as isize;
             let winc = win.clone();
-            println!("[rust] mouse thread starting, hwnd={hwnd} scale={scale}");
+            logf!("win", "mouse thread starting, hwnd={hwnd} scale={scale}");
             thread::spawn(move || {
                 let mut n = 0u32;
                 let mut interactive = false;
@@ -152,6 +173,9 @@ fn main() {
                             let mut g = shared.lock().unwrap();
                             g.dragging = false;
                             g.p = (-1e6, -1e6, false, false);
+                            logf!("ptr", "fullscreen app with a hidden cursor: island input paused");
+                        } else {
+                            logf!("ptr", "fullscreen app gone: island input resumed");
                         }
                     }
                     if hidden { continue; }
@@ -165,7 +189,11 @@ fn main() {
                     // Over the island the window takes the mouse, so clicks never reach what's behind it.
                     let over = r[2] > 0.0 && x >= r[0] - 1.0 && x <= r[0] + r[2] + 1.0 && y >= r[1] - 1.0 && y <= r[1] + r[3] + 1.0;
                     let want = over || dragging;
-                    if want != interactive { interactive = want; let _ = winc.set_ignore_cursor_events(!want); }
+                    if want != interactive {
+                        interactive = want;
+                        let _ = winc.set_ignore_cursor_events(!want);
+                        logf!("ptr", "click-through {} at ({x:.0},{y:.0})", if want { "off (island takes the mouse)" } else { "on" });
+                    }
                 }
             });
             Ok(())

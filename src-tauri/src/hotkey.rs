@@ -36,10 +36,17 @@ fn register(app: &AppHandle, key: &str) -> Result<(), String> {
 
 /// Load saved settings and register the shortcut. Falls back to the default if the saved one is gone or taken.
 pub fn init(app: &AppHandle) {
-    let mut s: Settings = path(app).and_then(|p| fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    if register(app, &s.shortcut).is_err() {
-        s.shortcut = DEFAULT.into();
-        let _ = register(app, DEFAULT);
+    let file = path(app);
+    logf!("hotkey", "settings file: {}", file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<none>".into()));
+    let mut s: Settings = file.and_then(|p| fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    logf!("hotkey", "loaded shortcut={:?} hold={}", s.shortcut, s.hold);
+    match register(app, &s.shortcut) {
+        Ok(()) => logf!("hotkey", "registered {:?}", s.shortcut),
+        Err(e) => {
+            logf!("hotkey", "registering {:?} failed ({e}), falling back to {DEFAULT}", s.shortcut);
+            s.shortcut = DEFAULT.into();
+            if let Err(e) = register(app, DEFAULT) { logf!("hotkey", "fallback registration failed: {e}"); }
+        }
     }
     crate::stt::HOLD.store(s.hold, Ordering::Relaxed);
     *CUR.lock().unwrap() = Some(s);
@@ -50,6 +57,7 @@ pub fn stt_settings() -> Settings { get() }
 
 #[tauri::command]
 pub fn set_stt_hold(app: AppHandle, hold: bool) {
+    logf!("hotkey", "hold mode -> {hold}");
     crate::stt::HOLD.store(hold, Ordering::Relaxed);
     let mut s = get();
     s.hold = hold;
@@ -57,7 +65,10 @@ pub fn set_stt_hold(app: AppHandle, hold: bool) {
 }
 
 #[tauri::command]
-pub fn cancel_record_shortcut() { CANCEL.store(true, Ordering::Relaxed); }
+pub fn cancel_record_shortcut() {
+    logf!("hotkey", "shortcut recording cancelled by the UI");
+    CANCEL.store(true, Ordering::Relaxed);
+}
 
 /// Wait for the user to press a key combo anywhere on the system, then make it the dictation shortcut.
 #[tauri::command]
@@ -66,16 +77,16 @@ pub async fn record_shortcut(app: AppHandle) -> Result<String, String> {
     CANCEL.store(false, Ordering::Relaxed);
     // so pressing the current combo doesn't start dictation meanwhile
     if let Ok(sc) = old.shortcut.parse::<Shortcut>() { let _ = app.global_shortcut().unregister(sc); }
-    println!("[hotkey] recording a new shortcut");
+    logf!("hotkey", "recording a new shortcut (current {:?})", old.shortcut);
     let got = tauri::async_runtime::spawn_blocking(|| imp::record(&CANCEL)).await.map_err(|e| e.to_string());
-    println!("[hotkey] record result: {got:?}");
+    logf!("hotkey", "record result: {got:?}");
     let res = match got {
         Ok(Ok(k)) => register(&app, &k).map(|_| k),
         Ok(Err(e)) | Err(e) => Err(e),
     };
     match res {
-        Ok(k) => { save(&app, &Settings { shortcut: k.clone(), hold: old.hold }); Ok(k) }
-        Err(e) => { let _ = register(&app, &old.shortcut); Err(e) }
+        Ok(k) => { logf!("hotkey", "shortcut saved: {k}"); save(&app, &Settings { shortcut: k.clone(), hold: old.hold }); Ok(k) }
+        Err(e) => { logf!("hotkey", "shortcut not changed ({e}), restoring {:?}", old.shortcut); let _ = register(&app, &old.shortcut); Err(e) }
     }
 }
 
@@ -109,9 +120,10 @@ mod imp {
         // let go of anything already held (e.g. the key that was pressed just before)
         let t = Instant::now();
         while any() && t.elapsed() < Duration::from_secs(2) { sleep(Duration::from_millis(15)); }
+        logf!("hotkey", "record: waiting for a key combo");
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(15) {
-            if cancel.load(Ordering::Relaxed) { return Err("cancelled".into()); }
+            if cancel.load(Ordering::Relaxed) { logf!("hotkey", "record: cancelled"); return Err("cancelled".into()); }
             sleep(Duration::from_millis(8));
             let Some(vk) = (0x08u16..=0xDE).find(|&v| name(v).is_some() && down(v)) else { continue };
             let mut parts: Vec<String> = Vec::new();
@@ -121,13 +133,18 @@ mod imp {
             if down(0x5B) || down(0x5C) { parts.push("Super".into()); }
             let n = name(vk).unwrap();
             let fkey = n.starts_with('F') && n[1..].chars().all(|c| c.is_ascii_digit());
-            if parts.is_empty() && !fkey { return Err("Add Ctrl, Alt or Shift (or use an F-key)".into()); }
+            if parts.is_empty() && !fkey {
+                logf!("hotkey", "record: {n} alone is not enough");
+                return Err("Add Ctrl, Alt or Shift (or use an F-key)".into());
+            }
             parts.push(n);
+            logf!("hotkey", "record: captured {}", parts.join("+"));
             // wait for release so the keys don't leak into the app underneath
             let t = Instant::now();
             while any() && t.elapsed() < Duration::from_secs(3) { sleep(Duration::from_millis(15)); }
             return Ok(parts.join("+"));
         }
+        logf!("hotkey", "record: timed out after 15s");
         Err("cancelled".into())
     }
 }

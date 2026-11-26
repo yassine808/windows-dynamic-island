@@ -92,10 +92,12 @@ pub async fn media_art() -> Option<String> {
 
 #[tauri::command]
 pub async fn media_control(action: String) {
+    logf!("media", "control: {action}");
     let _ = tauri::async_runtime::spawn_blocking(move || imp::control(&action)).await;
 }
 
 #[tauri::command]
 pub async fn media_seek(ms: i64) {
+    logf!("media", "seek: {ms} ms");
     let _ = tauri::async_runtime::spawn_blocking(move || imp::seek(ms)).await;
 }
