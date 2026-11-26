@@ -9,9 +9,8 @@ type Tm = { total: number; left: number; end: number; running: boolean; done: bo
 type Mix = { vol: number; mute: boolean; mic: number; mic_mute: boolean; ok: boolean };
 type St = { cpu: number; ram: number; gpu: number; down: number; up: number };
 type Px = { hex: string; r: number; g: number; b: number };
-type Hide = "off" | "sides" | "all";
 const PAGES = 7; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 tools, 6 auto-hide
-const PAGE_H = [190, 138, 160, 140, 150, 230, 138];
+const PAGE_H = [190, 138, 160, 140, 150, 230, 152];
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 // one wheel of the timer picker: scroll over it (or click the dim numbers) to change the value; wraps around
@@ -310,8 +309,18 @@ export default function App() {
     return () => clearTimeout(id);
   }, [tm.done]);
 
-  const [hide, setHide] = useState<Hide>(() => { try { const v = localStorage.getItem("hide"); return v === "off" || v === "all" ? v : "sides"; } catch { return "sides"; } });
-  const setHidePref = (v: Hide) => { setHide(v); try { localStorage.setItem("hide", v); } catch {} };
+  // Auto-hide per axis: top/bottom and left/right are toggled separately. Reads the old single
+  // "hide" key (off / sides / all) once so an existing preference is not lost.
+  const [hideUD, setHideUD] = useState<boolean>(() => {
+    try { const v = localStorage.getItem("hideUD"); return v ? v === "on" : localStorage.getItem("hide") === "all"; } catch { return false; }
+  });
+  const [hideLR, setHideLR] = useState<boolean>(() => {
+    try { const v = localStorage.getItem("hideLR"); return v ? v === "on" : localStorage.getItem("hide") !== "off"; } catch { return true; }
+  });
+  const setHidePref = (k: "ud" | "lr", v: boolean) => {
+    (k === "ud" ? setHideUD : setHideLR)(v);
+    try { localStorage.setItem(k === "ud" ? "hideUD" : "hideLR", v ? "on" : "off"); } catch {}
+  };
 
   // ---- mixer / stats / tools state ----
   const [mix, setMix] = useState<Mix>({ vol: 0.5, mute: false, mic: 0.8, mic_mute: false, ok: true });
@@ -495,14 +504,14 @@ export default function App() {
     animate(lift, 1, move); animate(flat, 1, spring);
   }, [edge, mode, hover, tucked, dragging, nonce, page]);
 
-  // tuck into the edge when idle (not on top)
+  // tuck into the edge when idle (if that edge's axis is enabled)
   useEffect(() => {
     setTucked(false);
-    const can = hide === "all" || (hide === "sides" && edge !== "top");
+    const can = edge === "top" || edge === "bottom" ? hideUD : hideLR;
     if (!can || hover || dragging || stt.active || pick) return;
     const id = setTimeout(() => setTucked(true), 2500);
     return () => clearTimeout(id);
-  }, [edge, hover, dragging, stt.active, nonce, hide, pick]);
+  }, [edge, hover, dragging, stt.active, nonce, hideUD, hideLR, pick]);
 
   // report hit rect so Rust can toggle click-through
   useEffect(() => {
@@ -826,14 +835,25 @@ export default function App() {
                 <div className="top">
                   <div className="col">
                     <div className="title">Auto-hide</div>
-                    <div className="artist">{hide === "off" ? "Always visible" : hide === "sides" ? "Hides on left, right and bottom" : "Hides on every edge, even the top"}</div>
+                    <div className="artist">
+                      {!hideUD && !hideLR ? "Always visible" : hideUD && hideLR ? "Hides on every edge" : hideUD ? "Hides when up or down" : "Hides when left or right"}
+                    </div>
                   </div>
                 </div>
-                <div className="cfg">
-                  <div className="seg" role="group" aria-label="Auto-hide">
-                    <button className={hide === "off" ? "on" : ""} onClick={() => setHidePref("off")}>Never</button>
-                    <button className={hide === "sides" ? "on" : ""} onClick={() => setHidePref("sides")}>Sides</button>
-                    <button className={hide === "all" ? "on" : ""} onClick={() => setHidePref("all")}>All edges</button>
+                <div className="cfgcol">
+                  <div className="cfg">
+                    <span className="hint">Up / down</span>
+                    <div className="seg" role="group" aria-label="Auto-hide on top and bottom">
+                      <button className={hideUD ? "" : "on"} onClick={() => setHidePref("ud", false)}>Off</button>
+                      <button className={hideUD ? "on" : ""} onClick={() => setHidePref("ud", true)}>On</button>
+                    </div>
+                  </div>
+                  <div className="cfg">
+                    <span className="hint">Left / right</span>
+                    <div className="seg" role="group" aria-label="Auto-hide on left and right">
+                      <button className={hideLR ? "" : "on"} onClick={() => setHidePref("lr", false)}>Off</button>
+                      <button className={hideLR ? "on" : ""} onClick={() => setHidePref("lr", true)}>On</button>
+                    </div>
                   </div>
                 </div>
               </motion.div>
