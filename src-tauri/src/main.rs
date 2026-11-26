@@ -1,11 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod hotkey;
 mod media;
 mod stt;
 
 use std::{sync::{Arc, Mutex}, thread, time::Duration};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, State};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
 
 #[derive(Default)]
 struct Hit { r: [f64; 4], dragging: bool, p: (f64, f64, bool, bool), mons: Vec<[f64; 4]> }
@@ -55,18 +56,20 @@ fn main() {
     tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|_app, _sc, ev| {
-                    if ev.state() == ShortcutState::Pressed { stt::toggle(); }
+                .with_handler(|_app, _sc, ev| match ev.state() {
+                    // hold = push-to-talk (listen while the key is down); otherwise press to start, press to stop
+                    ShortcutState::Pressed => if stt::hold() { stt::start() } else { stt::toggle() },
+                    ShortcutState::Released => if stt::hold() { stt::stop() },
                 })
                 .build(),
         )
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
-            media::media_poll, media::media_art, media::media_control, set_hit_rect, set_dragging, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle
+            media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_dragging, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
+            hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::cancel_record_shortcut
         ])
         .setup(move |app| {
-            app.global_shortcut()
-                .register(Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space))?;
+            hotkey::init(app.handle());
 
             // Transparent overlay over the whole primary monitor; the island lives inside it.
             let win = app.get_webview_window("main").unwrap();

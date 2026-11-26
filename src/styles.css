@@ -13,6 +13,7 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 
 .shell { position: absolute; left: 0; top: 0; touch-action: none; }
 .stage, .stage * { cursor: default; }
+.stage button, .stage button *, .stage .seek:not(.off), .stage .seek:not(.off) * { cursor: pointer; }
 .stage.dragging, .stage.dragging * { cursor: grabbing; }
 .island { position: absolute; inset: 0; background: #000; overflow: hidden; transition: box-shadow 0.3s; }
 .stage.dragging .island { box-shadow: 0 22px 50px rgba(0, 0, 0, 0.5); }
@@ -67,12 +68,15 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 
 /* progress, iOS style */
 .prog { display: flex; align-items: center; gap: 9px; font-size: 11px; font-weight: 600; color: var(--label-secondary); font-variant-numeric: tabular-nums; }
-.track { flex: 1; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.28); overflow: hidden; }
+.seek { flex: 1; height: 22px; margin: -8px 0; display: flex; align-items: center; }
+.track { width: 100%; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.28); overflow: hidden; transition: height 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .track b { display: block; height: 100%; background: #fff; border-radius: 3px; transition: width 0.25s linear; }
+.seek:not(.off):hover .track, .seek.on .track { height: 9px; }
+.seek.on .track b { transition: none; }
 
 /* transport controls: small white SF glyphs, centres 72px apart, no backgrounds (as on iOS) */
 .controls { display: flex; justify-content: center; align-items: center; }
-.controls button { position: relative; display: grid; place-items: center; width: 72px; height: 36px; padding: 0; border: 0; background: none; color: #fff; -webkit-tap-highlight-color: transparent; transition: transform 0.38s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.38s; }
+.controls button { position: relative; display: grid; place-items: center; width: 76px; height: 36px; padding: 0; border: 0; background: none; color: #fff; -webkit-tap-highlight-color: transparent; transition: transform 0.38s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.38s; }
 .controls button > svg, .controls .glyph { grid-area: 1 / 1; display: grid; place-items: center; }
 .controls .glyph { position: relative; }
 /* press: shrink + dim instantly, spring back with a little overshoot on release */
@@ -81,9 +85,20 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 
 /* dictation */
 .mic { width: 36px; height: 36px; border-radius: 50%; background: var(--red); display: grid; place-items: center; flex: none; }
-.micbtn { width: 46px; height: 46px; border-radius: 50%; border: 0; background: var(--fill); display: grid; place-items: center; cursor: default; flex: none; transition: background 0.25s, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.micbtn { width: 46px; height: 46px; border-radius: 50%; border: 0; background: var(--fill); display: grid; place-items: center; flex: none; transition: background 0.25s, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .micbtn.on { background: var(--red); }
 .micbtn.pressed, .micbtn:active { transform: scale(0.88); }
+/* shortcut row */
+.cfg { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 12px; border: 0; border-radius: 14px; background: var(--fill); color: #fff; font: 600 12.5px var(--font); white-space: nowrap; transition: background 0.2s, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--label-secondary); transition: background 0.2s; }
+.chip.rec { background: rgba(255, 69, 58, 0.28); }
+.chip.rec .dot { background: var(--red); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+.seg { display: flex; padding: 2px; border-radius: 15px; background: var(--fill); }
+.seg button { height: 24px; padding: 0 12px; border: 0; border-radius: 12px; background: none; color: var(--label-secondary); font: 600 12.5px var(--font); transition: background 0.2s, color 0.2s; }
+.seg button.on { background: #fff; color: #000; }
+.cfg button.pressed, .cfg button:active { opacity: 0.6; }
 .tx { flex: 1; min-height: 0; margin-top: 10px; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; font-size: 16px; line-height: 1.3; font-weight: 500; -webkit-mask-image: linear-gradient(to bottom, transparent, #000 35%); mask-image: linear-gradient(to bottom, transparent, #000 35%); }
 .tw { display: block; }
 .w { display: inline; animation: wordin 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }

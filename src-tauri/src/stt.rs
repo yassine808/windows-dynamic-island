@@ -1,12 +1,15 @@
 // Real-time dictation: Windows speech recognition (WinRT), typed into the focused field with SendInput. No clipboard.
 use serde::Serialize;
-use std::sync::{mpsc::{channel, Receiver, Sender}, Mutex};
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc::{channel, Receiver, Sender}, Mutex};
 
 #[derive(Serialize, Clone, Default)]
 pub struct SttState { pub active: bool, pub partial: String, pub text: String, pub err: String }
 
 static STATE: Mutex<SttState> = Mutex::new(SttState { active: false, partial: String::new(), text: String::new(), err: String::new() });
 static STOP: Mutex<Option<Sender<()>>> = Mutex::new(None);
+/// true = push-to-talk (listen while the shortcut is held), false = press once to start, again to stop
+pub static HOLD: AtomicBool = AtomicBool::new(false);
+pub fn hold() -> bool { HOLD.load(Ordering::Relaxed) }
 
 #[tauri::command]
 pub fn stt_state() -> SttState { STATE.lock().unwrap().clone() }
@@ -15,12 +18,13 @@ pub fn stt_state() -> SttState { STATE.lock().unwrap().clone() }
 pub fn stt_toggle() { toggle() }
 
 pub fn toggle() {
-    let mut stop = STOP.lock().unwrap();
-    if let Some(tx) = stop.take() {
-        if tx.send(()).is_ok() { return; }
-    }
+    if STATE.lock().unwrap().active { stop() } else { start() }
+}
+
+pub fn start() {
+    if STATE.lock().unwrap().active { return; }
     let (tx, rx) = channel();
-    *stop = Some(tx);
+    *STOP.lock().unwrap() = Some(tx);
     *STATE.lock().unwrap() = SttState { active: true, ..Default::default() };
     std::thread::spawn(move || {
         if let Err(e) = imp::run(rx) { STATE.lock().unwrap().err = e; }
@@ -28,6 +32,10 @@ pub fn toggle() {
         s.active = false;
         s.partial.clear();
     });
+}
+
+pub fn stop() {
+    if let Some(tx) = STOP.lock().unwrap().take() { let _ = tx.send(()); }
 }
 
 #[cfg(windows)]
@@ -39,11 +47,17 @@ mod imp {
             SpeechContinuousRecognitionResultGeneratedEventArgs as ResArgs, SpeechContinuousRecognitionSession as Session,
             SpeechRecognitionHypothesisGeneratedEventArgs as HypArgs, SpeechRecognitionResultStatus, SpeechRecognizer,
         },
-        Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY},
+        Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY},
     };
 
+    fn key(vk: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+    }
+
     fn type_text(s: &str) {
-        let mut v: Vec<INPUT> = Vec::new();
+        // Hold-to-talk keeps Ctrl/Alt/... physically down: lift them while typing so the text isn't read as shortcuts, then put them back.
+        let held: Vec<u16> = [0x11u16, 0x12, 0x10, 0x5B, 0x5C].into_iter().filter(|&k| unsafe { (GetAsyncKeyState(k as i32) as u16) & 0x8000 != 0 }).collect();
+        let mut v: Vec<INPUT> = held.iter().map(|&k| key(k, KEYEVENTF_KEYUP)).collect();
         for u in s.encode_utf16() {
             for up in [false, true] {
                 let flags = if up { KEYEVENTF_UNICODE | KEYEVENTF_KEYUP } else { KEYEVENTF_UNICODE };
@@ -54,6 +68,9 @@ mod imp {
             }
         }
         unsafe { SendInput(&v, std::mem::size_of::<INPUT>() as i32); }
+        // put back only what is still physically held (never leave a modifier stuck)
+        let back: Vec<INPUT> = held.iter().filter(|&&k| unsafe { (GetAsyncKeyState(k as i32) as u16) & 0x8000 != 0 }).map(|&k| key(k, KEYBD_EVENT_FLAGS(0))).collect();
+        if !back.is_empty() { unsafe { SendInput(&back, std::mem::size_of::<INPUT>() as i32); } }
     }
 
     pub fn run(rx: Receiver<()>) -> Result<(), String> {

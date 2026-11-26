@@ -14,17 +14,19 @@ const dbg = (m: string) => TAURI && invoke("log", { msg: m });
 const call = (c: string, a?: Record<string, unknown>) => (TAURI ? invoke(c, a) : Promise.resolve(null));
 const spring = { type: "spring", stiffness: 380, damping: 28, mass: 0.9 } as const;
 const move = { type: "spring", stiffness: 260, damping: 22, mass: 1 } as const;
+// no overshoot: used when the island only slides along its own edge (un-tuck), so it can never pop off the edge
+const settle = { type: "spring", stiffness: 300, damping: 38, mass: 1 } as const;
 
-function sizeOf(m: Mode, v: boolean, peek: boolean) {
+function sizeOf(m: Mode, v: boolean, peek: boolean, page = 0) {
   if (m === "idle") return peek ? (v ? { w: 44, h: 150, r: 22 } : { w: 150, h: 44, r: 22 }) : v ? { w: 37, h: 126, r: 18.5 } : { w: 126, h: 37, r: 18.5 };
   if (m === "media") return v ? { w: 37, h: 170, r: 18.5 } : { w: 250, h: 37, r: 18.5 };
   if (m === "listening") return { w: 340, h: 84, r: 42 };
-  return { w: 370, h: 190, r: 44 };
+  return { w: 370, h: page === 1 ? 224 : 190, r: 44 };
 }
 
 function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boolean, m: Rect) {
   const horiz = e === "top" || e === "bottom";
-  const gap = tucked ? -(horiz ? s.h : s.w) * 0.6 : 0; // flush with the edge
+  const gap = tucked ? -(horiz ? s.h : s.w) * 0.6 : -1; // flush with the edge (1px past it)
   const half = (horiz ? s.w : s.h) / 2 + 12;
   const lo = (horiz ? m.x : m.y) + half, hi = (horiz ? m.x + m.w : m.y + m.h) - half;
   const a = Math.min(Math.max(along, lo), hi);
@@ -40,12 +42,14 @@ function useMedia() {
   const [media, setMedia] = useState<Media>(TAURI ? null : { title: "Blinding Lights", artist: "The Weeknd", playing: true, position: 42000, duration: 215000, at: performance.now() });
   const [art, setArt] = useState<string | null>(TAURI ? null : demoArt);
   const last = useRef("");
+  const freeze = useRef(0); // after a seek, ignore the (stale) polled position for a moment
   useEffect(() => {
     if (!TAURI) return;
     const tick = async () => {
       try {
         const m = await invoke<Omit<NonNullable<Media>, "at"> | null>("media_poll");
-        setMedia(m ? { ...m, at: performance.now() } : null);
+        const now = performance.now();
+        setMedia((prev) => (!m ? null : now < freeze.current && prev ? { ...m, position: prev.position, at: prev.at } : { ...m, at: now }));
         const k = m ? `${m.title}|${m.artist}` : "";
         if (k !== last.current) {
           last.current = k;
@@ -57,7 +61,7 @@ function useMedia() {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, []);
-  return { media, art, setMedia };
+  return { media, art, setMedia, freeze };
 }
 
 function useTint(art: string | null) {
@@ -145,35 +149,39 @@ const Bars = ({ playing, level }: { playing: boolean; level?: MotionValue<number
     </div>
   );
 
-const fmt = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
-function Progress({ m }: { m: NonNullable<Media> }) {
+// elapsed rounds down, remaining rounds up, so they always add up to the length (like iOS)
+const fmt = (ms: number, up = false) => { const s = Math.max(0, Math[up ? "ceil" : "floor"](ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+function Progress({ m, scrub }: { m: NonNullable<Media>; scrub: number | null }) {
   const [, f] = useState(0);
   useEffect(() => { const id = setInterval(() => f((n) => n + 1), 250); return () => clearInterval(id); }, []);
-  const d = m.duration;
-  const pos = Math.min(d || 1e12, m.position + (m.playing ? performance.now() - m.at : 0));
+  const d = m.duration > 0 ? m.duration : 0; // unknown length (live stream, some browsers) -> 0
+  const run = Math.min(d || 1e12, Math.max(0, m.position + (m.playing ? performance.now() - m.at : 0)));
+  const pos = scrub != null && d ? scrub * d : run;
   return (
     <div className="prog">
       <span>{fmt(pos)}</span>
-      <div className="track"><b style={{ width: d ? `${Math.min(100, (pos / d) * 100)}%` : "0%" }} /></div>
-      <span>-{fmt(d ? d - pos : 0)}</span>
+      <div className={`seek ${d ? "" : "off"} ${scrub != null ? "on" : ""}`}>
+        <div className="track"><b style={{ width: d ? `${Math.min(100, (pos / d) * 100)}%` : "0%" }} /></div>
+      </div>
+      {d > 0 && <span>-{fmt(d - pos, true)}</span>}
     </div>
   );
 }
 
-// SF Symbols, as drawn in the iOS Dynamic Island: backward.end.fill / pause.fill / play.fill / forward.end.fill
+// Transport glyphs like the iOS Dynamic Island: backward.fill / pause.fill / play.fill / forward.fill (rounded, filled)
 const Skip = ({ flip }: { flip?: boolean }) => (
-  <svg width="16" height="15" viewBox="0 0 31 29" fill="currentColor">
-    <g transform={flip ? "translate(31 0) scale(-1 1)" : undefined}>
-      <rect x="0" y="0" width="5.8" height="29" rx="2.2" />
-      <path d="M29.5 2.2V26.8L11.8 14.5z" stroke="currentColor" strokeWidth="3" strokeLinejoin="round" />
+  <svg width="30" height="19" viewBox="0 0 35 22" fill="currentColor" stroke="currentColor" strokeWidth="3.2" strokeLinejoin="round">
+    <g transform={flip ? "translate(35 0) scale(-1 1)" : undefined}>
+      <path d="M15.4 3.6V18.4L3.6 11z" />
+      <path d="M31.4 3.6V18.4L19.6 11z" />
     </g>
   </svg>
 );
 const Icon = {
   prev: <Skip />,
   next: <Skip flip />,
-  play: <svg width="15" height="17.5" viewBox="0 0 30 35" fill="currentColor"><path d="M5.5 5.2V29.8L25.8 17.5z" stroke="currentColor" strokeWidth="4.4" strokeLinejoin="round" /></svg>,
-  pause: <svg width="15" height="17.5" viewBox="0 0 30 35" fill="currentColor"><rect x="0" y="0" width="10.8" height="35" rx="2.8" /><rect x="19.2" y="0" width="10.8" height="35" rx="2.8" /></svg>,
+  play: <svg width="19" height="22" viewBox="0 0 30 35" fill="currentColor"><path d="M5.5 5.2V29.8L25.8 17.5z" stroke="currentColor" strokeWidth="4.4" strokeLinejoin="round" /></svg>,
+  pause: <svg width="17" height="22" viewBox="0 0 30 35" fill="currentColor"><rect x="0" y="0" width="10.8" height="35" rx="3.2" /><rect x="19.2" y="0" width="10.8" height="35" rx="3.2" /></svg>,
   mic: <svg viewBox="0 0 24 24" width="20" height="20" fill="#fff"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z" /></svg>,
 };
 
@@ -194,7 +202,7 @@ const pageV = {
 };
 
 export default function App() {
-  const { media, art, setMedia } = useMedia();
+  const { media, art, setMedia, freeze } = useMedia();
   const tint = useTint(art);
   const { stt, setStt } = useStt();
   const [page, setPage] = useState(0);
@@ -204,6 +212,14 @@ export default function App() {
   const [tucked, setTucked] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [nonce, setNonce] = useState(0);
+  const [scrub, setScrub] = useState<number | null>(null);
+  const [cfg, setCfg] = useState({ shortcut: "Ctrl+Alt+Space", hold: false });
+  const [rec, setRec] = useState(false);
+  const [recErr, setRecErr] = useState("");
+  const recCancel = useRef<(() => void) | null>(null);
+  const mediaRef = useRef(media);
+  mediaRef.current = media;
+  const flyKey = useRef("");
   const along = useRef(innerWidth / 2);
   const level = useMotionValue(0);
   const mons = useRef<Rect[]>([{ x: 0, y: 0, w: innerWidth, h: innerHeight }]);
@@ -215,7 +231,7 @@ export default function App() {
   const fx = useMotionValue(0.5), fy = useMotionValue(0);
   const w = useMotionValue(126), h = useMotionValue(37), r = useMotionValue(18.5), lift = useMotionValue(1), flat = useMotionValue(1);
   const rad = useTransform([r, flat], (v: number[]) => {
-    const o = v[0] * (1 - v[1]), i = v[0], e = edgeRef.current;
+    const o = Math.max(0, v[0] * (1 - v[1])), i = v[0], e = edgeRef.current;
     if (e === "top") return `${o}px ${o}px ${i}px ${i}px`;
     if (e === "bottom") return `${i}px ${i}px ${o}px ${o}px`;
     if (e === "left") return `${o}px ${i}px ${i}px ${o}px`;
@@ -235,6 +251,27 @@ export default function App() {
   const toggleStt = () => (TAURI ? call("stt_toggle") : setStt((s) => ({ ...s, active: !s.active, text: s.active ? s.text : "", partial: s.active ? "" : "Dictation preview, words appear as you speak" })));
 
   useEffect(() => { if (stt.active) { setDir(0); setPage(1); } }, [stt.active]);
+  useEffect(() => { if (TAURI) invoke<{ shortcut: string; hold: boolean }>("stt_settings").then(setCfg).catch(() => {}); }, []);
+  const pretty = (k: string) => k.split("+").map((p) => p.replace(/^Key|^Digit/, "").replace(/^Arrow/, "")).join(" + ");
+  const setHold = (hold: boolean) => { setCfg((c) => ({ ...c, hold })); call("set_stt_hold", { hold }); };
+  const record = async () => {
+    if (rec) { if (TAURI) call("cancel_record_shortcut"); else recCancel.current?.(); return; }
+    setRec(true); setRecErr("");
+    try {
+      const k = TAURI ? await invoke<string>("record_shortcut") : await new Promise<string>((res, rej) => {
+        const h = (e: KeyboardEvent) => {
+          if (/^(Control|Shift|Alt|Meta)/.test(e.code)) return;
+          e.preventDefault(); removeEventListener("keydown", h); recCancel.current = null;
+          if (e.code === "Escape") return rej("cancelled");
+          res([e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super", e.code].filter(Boolean).join("+"));
+        };
+        addEventListener("keydown", h);
+        recCancel.current = () => { removeEventListener("keydown", h); rej("cancelled"); };
+      });
+      setCfg((c) => ({ ...c, shortcut: k }));
+    } catch (e) { if (String(e) !== "cancelled") setRecErr(String(e)); }
+    setRec(false);
+  };
 
   // mouse wheel switches pages
   const wheel = useRef({ acc: 0, t: 0, last: 0 });
@@ -254,13 +291,15 @@ export default function App() {
   // spring everything to its target
   useEffect(() => {
     if (dragging) return;
-    const s = sizeOf(mode, vertical, hover);
+    const s = sizeOf(mode, vertical, hover, page);
     const t = target(edge, along.current, s, tucked, monRef.current);
+    const key = `${edge}|${nonce}`, fly = key !== flyKey.current; // fly = just released from a drag
+    flyKey.current = key;
     animate(w, s.w, spring); animate(h, s.h, spring); animate(r, s.r, spring);
-    animate(ex, t.ex, move); animate(ey, t.ey, move);
+    animate(ex, t.ex, fly ? move : settle); animate(ey, t.ey, fly ? move : settle);
     animate(fx, t.fx, move); animate(fy, t.fy, move);
     animate(lift, 1, move); animate(flat, 1, spring);
-  }, [edge, mode, hover, tucked, dragging, nonce]);
+  }, [edge, mode, hover, tucked, dragging, nonce, page]);
 
   // tuck into the edge when idle (not on top)
   useEffect(() => {
@@ -284,9 +323,18 @@ export default function App() {
   }, []);
 
   // drag + snap
-  const d = useRef<{ gx: number; gy: number; sx: number; sy: number; on: boolean; vx: number; vy: number; lx: number; ly: number; lt: number } | null>(null);
+  const d = useRef<{ gx: number; gy: number; sx: number; sy: number; on: boolean; vx: number; vy: number; lx: number; ly: number; lt: number; lock: boolean; hz: boolean; mid: number } | null>(null);
   const pdown = (cx: number, cy: number) => {
-    d.current = { gx: cx - x.get(), gy: cy - y.get(), sx: cx, sy: cy, on: false, vx: 0, vy: 0, lx: cx, ly: cy, lt: performance.now() };
+    d.current = { gx: cx - x.get(), gy: cy - y.get(), sx: cx, sy: cy, on: false, vx: 0, vy: 0, lx: cx, ly: cy, lt: performance.now(), lock: false, hz: true, mid: 0 };
+  };
+  const monAt = (cx: number, cy: number) => {
+    const list = mons.current;
+    return list.find((q) => cx >= q.x && cx < q.x + q.w && cy >= q.y && cy < q.y + q.h) ||
+      list.reduce((a, q) => (Math.hypot(cx - (q.x + q.w / 2), cy - (q.y + q.h / 2)) < Math.hypot(cx - (a.x + a.w / 2), cy - (a.y + a.h / 2)) ? q : a));
+  };
+  const edgeAt = (m: Rect, px: number, py: number) => {
+    const dist: Record<Edge, number> = { top: py - m.y, bottom: m.y + m.h - py, left: px - m.x, right: m.x + m.w - px };
+    return (Object.keys(dist) as Edge[]).reduce((a, b) => (dist[a] < dist[b] ? a : b));
   };
   const pmove = (cx: number, cy: number) => {
     const s = d.current;
@@ -304,7 +352,16 @@ export default function App() {
     s.vx = s.vx * 0.6 + ((cx - s.lx) / dt) * 1000 * 0.4;
     s.vy = s.vy * 0.6 + ((cy - s.ly) / dt) * 1000 * 0.4;
     s.lx = cx; s.ly = cy; s.lt = now;
-    ex.set(cx - s.gx); ey.set(cy - s.gy);
+    // magnetic center (like Word's guides): near the middle of the screen the island sticks there until you pull away
+    let tx = cx - s.gx, ty = cy - s.gy;
+    const iw = w.get(), ih = h.get(), icx = tx + iw / 2, icy = ty + ih / 2;
+    const m = monAt(icx, icy), e = edgeAt(m, icx, icy), hz = e === "top" || e === "bottom";
+    const mid = hz ? m.x + m.w / 2 : m.y + m.h / 2, off = Math.abs((hz ? icx : icy) - mid);
+    if (s.hz !== hz) s.lock = false;
+    s.hz = hz; s.mid = mid;
+    if (!s.lock && off < 14) s.lock = true; else if (s.lock && off > 34) s.lock = false;
+    if (s.lock) { if (hz) tx = mid - iw / 2; else ty = mid - ih / 2; }
+    ex.set(tx); ey.set(ty);
   };
   const pup = () => {
     const s = d.current;
@@ -313,47 +370,73 @@ export default function App() {
     call("set_dragging", { on: false });
     const cx = ex.get() + w.get() / 2, cy = ey.get() + h.get() / 2;
     const px = cx + s.vx * 0.15, py = cy + s.vy * 0.15;
-    const list = mons.current;
-    const m = list.find((q) => cx >= q.x && cx < q.x + q.w && cy >= q.y && cy < q.y + q.h) ||
-      list.reduce((a, q) => (Math.hypot(cx - (q.x + q.w / 2), cy - (q.y + q.h / 2)) < Math.hypot(cx - (a.x + a.w / 2), cy - (a.y + a.h / 2)) ? q : a));
+    const m = monAt(cx, cy);
     monRef.current = m;
-    const dist: Record<Edge, number> = { top: py - m.y, bottom: m.y + m.h - py, left: px - m.x, right: m.x + m.w - px };
-    const e = (Object.keys(dist) as Edge[]).reduce((a, b) => (dist[a] < dist[b] ? a : b));
-    let a = e === "top" || e === "bottom" ? px : py;
-    const mid = e === "top" || e === "bottom" ? m.x + m.w / 2 : m.y + m.h / 2;
-    if (Math.abs(a - mid) < 48) a = mid; // magnetic center
-    along.current = a;
+    const e = edgeAt(m, px, py), hz = e === "top" || e === "bottom";
+    let a = hz ? px : py;
+    if (s.lock && s.hz === hz) a = s.mid; // stuck to the center: stay exactly there
     setEdge(e); setDragging(false); setNonce((n) => n + 1);
   };
   const fn = useRef({ pdown, pmove, pup });
   fn.current = { pdown, pmove, pup };
 
+  // seek bar: click or drag
+  const seekTo = (f: number, commit: boolean) => {
+    const m = mediaRef.current;
+    if (!m || m.duration <= 0) return;
+    f = Math.min(1, Math.max(0, f));
+    if (!commit) return setScrub(f);
+    setScrub(null);
+    const ms = Math.round(f * m.duration);
+    freeze.current = performance.now() + 1500;
+    setMedia({ ...m, position: ms, at: performance.now() });
+    call("media_seek", { ms });
+  };
+  const seekFn = useRef(seekTo);
+  seekFn.current = seekTo;
+
   // browser fallback (no Tauri): normal DOM pointer events
+  const skb = useRef<DOMRect | null>(null);
   const down = (e: React.PointerEvent) => {
-    if (TAURI || (e.target as HTMLElement).closest("button")) return;
+    const t = e.target as HTMLElement;
+    if (TAURI || t.closest("button")) return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    const sk = t.closest(".seek:not(.off)");
+    if (sk) { skb.current = sk.getBoundingClientRect(); seekTo((e.clientX - skb.current.left) / skb.current.width, false); return; }
     pdown(e.clientX, e.clientY);
   };
-  const mv = (e: React.PointerEvent) => !TAURI && pmove(e.clientX, e.clientY);
-  const up = () => !TAURI && pup();
+  const mv = (e: React.PointerEvent) => {
+    if (TAURI) return;
+    if (skb.current) seekTo((e.clientX - skb.current.left) / skb.current.width, false); else pmove(e.clientX, e.clientY);
+  };
+  const up = (e: React.PointerEvent) => {
+    if (TAURI) return;
+    if (skb.current) { seekTo((e.clientX - skb.current.left) / skb.current.width, true); skb.current = null; } else pup();
+  };
 
   // Tauri: Rust reads the mouse (window stays click-through elsewhere); we poll it
   useEffect(() => {
     if (!TAURI) return;
-    let active = false, btn: HTMLElement | null = null;
+    let active = false, btn: HTMLElement | null = null, sk: DOMRect | null = null;
+    const frac = (p: P) => (sk ? (p.x - sk.left) / sk.width : 0);
     const onPtr = (p: P) => {
       if (!d.current?.on) setHover(p.inside);
       const f = fn.current;
       if (p.down && !active) {
         if (!p.inside) return;
         active = true;
-        btn = document.elementFromPoint(p.x, p.y)?.closest("button") as HTMLElement | null;
-        if (btn) btn.classList.add("pressed"); else f.pdown(p.x, p.y);
+        const el = document.elementFromPoint(p.x, p.y);
+        btn = el?.closest("button") as HTMLElement | null;
+        const seek = !btn ? (el?.closest(".seek:not(.off)") as HTMLElement | null) : null;
+        if (seek) { sk = seek.getBoundingClientRect(); seekFn.current(frac(p), false); }
+        else if (btn) btn.classList.add("pressed"); else f.pdown(p.x, p.y);
       } else if (p.down && active) {
-        if (!btn) f.pmove(p.x, p.y);
+        if (sk) seekFn.current(frac(p), false);
+        else if (!btn) f.pmove(p.x, p.y);
       } else if (!p.down && active) {
         active = false;
-        if (btn) {
+        if (sk) { seekFn.current(frac(p), true); sk = null; }
+        else if (btn) {
           btn.classList.remove("pressed");
           if (document.elementFromPoint(p.x, p.y)?.closest("button") === btn) btn.click();
           btn = null;
@@ -429,7 +512,7 @@ export default function App() {
                       <div className="col"><div className="title">{media.title}</div><div className="artist">{media.artist}</div></div>
                       <Bars playing={media.playing} />
                     </div>
-                    {SCRUBBER && <Progress m={media} />}
+                    {SCRUBBER && <Progress m={media} scrub={scrub} />}
                     <div className="controls">
                       <button aria-label="Previous" onClick={() => control("prev")}>{Icon.prev}</button>
                       <button aria-label={media.playing ? "Pause" : "Play"} onClick={() => control("toggle")}>
@@ -449,9 +532,18 @@ export default function App() {
                   <button className={`micbtn ${stt.active ? "on" : ""}`} onClick={toggleStt}>{Icon.mic}</button>
                   <div className="col">
                     <div className="title">Dictation</div>
-                    <div className="artist">{stt.err || (stt.active ? "Listening…" : "Tap to dictate")}</div>
+                    <div className="artist">{stt.err || recErr || (rec ? "Press your shortcut…" : stt.active ? "Listening…" : cfg.hold ? `Hold ${pretty(cfg.shortcut)}` : "Tap to dictate")}</div>
                   </div>
                   <Bars playing={stt.active} level={stt.active ? level : undefined} />
+                </div>
+                <div className="cfg">
+                  <button className={`chip ${rec ? "rec" : ""}`} aria-label="Record shortcut" onClick={record}>
+                    <i className="dot" />{rec ? "Press keys…" : pretty(cfg.shortcut)}
+                  </button>
+                  <div className="seg" role="group" aria-label="Shortcut mode">
+                    <button className={cfg.hold ? "on" : ""} onClick={() => setHold(true)}>Hold</button>
+                    <button className={cfg.hold ? "" : "on"} onClick={() => setHold(false)}>Toggle</button>
+                  </div>
                 </div>
                 <div className="tx">
                   {full ? (
@@ -459,7 +551,7 @@ export default function App() {
                       {done.map((t, i) => <span key={"d" + i} className="w">{t} </span>)}
                       {live.map((t, i) => <span key={"l" + i + t} className="w hint">{t} </span>)}
                     </div>
-                  ) : <span className="hint">{stt.active ? "Listening… start speaking" : "Tap the mic or press Ctrl+Alt+Space, then speak. Words appear here live and are typed into the text field you have selected."}</span>}
+                  ) : <span className="hint">{stt.active ? "Listening… start speaking" : cfg.hold ? `Hold ${pretty(cfg.shortcut)}, speak, then let go. Words are typed into the text field you have selected.` : `Tap the mic or press ${pretty(cfg.shortcut)}, then speak. Words are typed into the text field you have selected.`}</span>}
                 </div>
               </motion.div>
             )}

@@ -51,6 +51,13 @@ mod imp {
         Some(format!("data:image/png;base64,{}", STANDARD.encode(buf)))
     }
 
+    pub fn seek(ms: i64) {
+        if let Some(s) = session() {
+            let st = s.GetTimelineProperties().ok().and_then(|t| t.StartTime().ok()).map(|d| d.Duration).unwrap_or(0);
+            let _ = s.TryChangePlaybackPositionAsync(st + ms * 10_000).and_then(|a| a.get());
+        }
+    }
+
     pub fn control(action: &str) {
         if let Some(s) = session() {
             let _ = match action {
@@ -69,6 +76,7 @@ mod imp {
     pub fn poll() -> Option<MediaInfo> { None }
     pub fn art() -> Option<String> { None }
     pub fn control(_: &str) {}
+    pub fn seek(_: i64) {}
 }
 
 // async commands run off the main thread; WinRT .get() on the UI thread can deadlock it.
@@ -85,4 +93,9 @@ pub async fn media_art() -> Option<String> {
 #[tauri::command]
 pub async fn media_control(action: String) {
     let _ = tauri::async_runtime::spawn_blocking(move || imp::control(&action)).await;
+}
+
+#[tauri::command]
+pub async fn media_seek(ms: i64) {
+    let _ = tauri::async_runtime::spawn_blocking(move || imp::seek(ms)).await;
 }
