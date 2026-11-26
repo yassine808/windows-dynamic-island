@@ -92,10 +92,26 @@ pub async fn record_shortcut(app: AppHandle) -> Result<String, String> {
 
 #[cfg(windows)]
 mod imp {
-    use std::{sync::atomic::{AtomicBool, Ordering}, thread::sleep, time::{Duration, Instant}};
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    use std::{
+        sync::{atomic::{AtomicBool, Ordering}, Mutex},
+        thread::sleep,
+        time::{Duration, Instant},
+    };
+    use windows::Win32::{
+        Foundation::{LPARAM, LRESULT, WPARAM},
+        UI::{
+            Input::KeyboardAndMouse::GetAsyncKeyState,
+            WindowsAndMessaging::{
+                CallNextHookEx, PeekMessageW, SetWindowsHookExW, UnhookWindowsHookEx, KBDLLHOOKSTRUCT,
+                MSG, PM_REMOVE, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
+            },
+        },
+    };
 
     fn down(vk: u16) -> bool { unsafe { (GetAsyncKeyState(vk as i32) as u16) & 0x8000 != 0 } }
+
+    /// dwExtraInfo we stamp on every key event the dictation typer injects, so recording can ignore them.
+    const OURS: usize = 0x49534C57; // "ISLW"
 
     // Windows virtual-key -> W3C key code name (what the shortcut parser expects)
     fn name(vk: u16) -> Option<String> {
@@ -115,38 +131,119 @@ mod imp {
         })
     }
 
-    pub fn record(cancel: &AtomicBool) -> Result<String, String> {
-        let any = || (0x08u16..=0xDE).any(|v| name(v).is_some() && down(v));
-        // let go of anything already held (e.g. the key that was pressed just before)
-        let t = Instant::now();
-        while any() && t.elapsed() < Duration::from_secs(2) { sleep(Duration::from_millis(15)); }
-        logf!("hotkey", "record: waiting for a key combo");
-        let t = Instant::now();
-        while t.elapsed() < Duration::from_secs(15) {
-            if cancel.load(Ordering::Relaxed) { logf!("hotkey", "record: cancelled"); return Err("cancelled".into()); }
-            if down(0x1B) { logf!("hotkey", "record: Escape, cancelled"); return Err("cancelled".into()); }
-            sleep(Duration::from_millis(8));
-            let Some(vk) = (0x08u16..=0xDE).find(|&v| name(v).is_some() && down(v)) else { continue };
-            let mut parts: Vec<String> = Vec::new();
-            if down(0x11) { parts.push("Ctrl".into()); }
-            if down(0x12) { parts.push("Alt".into()); }
-            if down(0x10) { parts.push("Shift".into()); }
-            if down(0x5B) || down(0x5C) { parts.push("Super".into()); }
-            let n = name(vk).unwrap();
-            let fkey = n.starts_with('F') && n[1..].chars().all(|c| c.is_ascii_digit());
-            if parts.is_empty() && !fkey {
-                logf!("hotkey", "record: {n} alone is not enough");
-                return Err("Add Ctrl, Alt or Shift (or use an F-key)".into());
+    fn modifier(vk: u16) -> bool {
+        matches!(vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0x5D | 0xA0..=0xA5)
+    }
+
+    /// First real key pressed while the hook is installed; the hook runs on the recording thread.
+    static HIT: Mutex<Option<u16>> = Mutex::new(None);
+
+    unsafe extern "system" fn hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+        if code >= 0 && (w.0 as u32 == WM_KEYDOWN || w.0 as u32 == WM_SYSKEYDOWN) {
+            let kb = &*(l.0 as *const KBDLLHOOKSTRUCT);
+            let vk = kb.vkCode as u16;
+            // skip modifiers (they only qualify the combo) and our own typing (stamped OURS)
+            if !modifier(vk) && kb.dwExtraInfo != OURS {
+                if let Ok(mut h) = HIT.lock() {
+                    if h.is_none() {
+                        *h = Some(vk);
+                        logf!("hotkey", "record: saw key 0x{vk:02X}");
+                    }
+                }
             }
-            parts.push(n);
-            logf!("hotkey", "record: captured {}", parts.join("+"));
-            // wait for release so the keys don't leak into the app underneath
-            let t = Instant::now();
-            while any() && t.elapsed() < Duration::from_secs(3) { sleep(Duration::from_millis(15)); }
-            return Ok(parts.join("+"));
         }
-        logf!("hotkey", "record: timed out after 15s");
-        Err("cancelled".into())
+        CallNextHookEx(None, code, w, l)
+    }
+
+    /// Fallback for machines where no low-level hook callback arrives: a key that is still down a
+    /// few ms later is a real press, not one of the typer's back-to-back injected characters.
+    fn poll() -> Option<u16> {
+        let vk = (0x01u16..=0xFE).find(|&v| name(v).is_some() && down(v))?;
+        sleep(Duration::from_millis(24));
+        down(vk).then_some(vk)
+    }
+
+    fn released(vk: u16) -> bool {
+        !down(vk) && !down(0x10) && !down(0x11) && !down(0x12) && !down(0x5B) && !down(0x5C)
+    }
+
+    pub fn record(cancel: &AtomicBool) -> Result<String, String> {
+        *HIT.lock().unwrap() = None;
+        let handle = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) }
+            .map_err(|e| { logf!("hotkey", "record: keyboard hook failed: {e}"); format!("keyboard hook failed: {e}") })?;
+        logf!("hotkey", "record: hook installed, waiting for a key combo");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seen = None;
+        while Instant::now() < deadline {
+            // a low-level hook is only called while its thread pumps messages
+            let mut msg = MSG::default();
+            while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {}
+            if cancel.load(Ordering::Relaxed) { logf!("hotkey", "record: cancelled"); break; }
+            if let Some(vk) = HIT.lock().unwrap().take().or_else(poll) { seen = Some(vk); break; }
+            sleep(Duration::from_millis(8));
+        }
+        unsafe { let _ = UnhookWindowsHookEx(handle); }
+        let Some(vk) = seen else {
+            logf!("hotkey", "record: nothing pressed within 30s");
+            return Err("Timed out, click the chip and press a key".into());
+        };
+        if vk == 0x1B { logf!("hotkey", "record: Escape, cancelled"); return Err("cancelled".into()); }
+        let Some(n) = name(vk) else {
+            logf!("hotkey", "record: key 0x{vk:02X} cannot be a shortcut");
+            return Err(format!("That key (0x{vk:02X}) cannot be a shortcut"));
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if down(0x11) { parts.push("Ctrl".into()); }
+        if down(0x12) { parts.push("Alt".into()); }
+        if down(0x10) { parts.push("Shift".into()); }
+        if down(0x5B) || down(0x5C) { parts.push("Super".into()); }
+        let fkey = n.starts_with('F') && n[1..].chars().all(|c| c.is_ascii_digit());
+        if parts.is_empty() && !fkey {
+            logf!("hotkey", "record: {n} alone is not enough");
+            return Err("Add Ctrl, Alt or Shift (or use an F-key)".into());
+        }
+        parts.push(n);
+        logf!("hotkey", "record: captured {}", parts.join("+"));
+        // let go of the combo before it is registered, so it does not fire the moment it goes live
+        let t = Instant::now();
+        while !released(vk) && t.elapsed() < Duration::from_secs(3) { sleep(Duration::from_millis(10)); }
+        Ok(parts.join("+"))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::{sync::atomic::AtomicBool, thread::sleep, time::Duration};
+
+    // The recorder must see keys injected by other programs too (keyboard remappers, tools), so a
+    // synthetic combo is a faithful test. Nothing is typed and the combo is inert in every app.
+    #[test]
+    fn captures_a_synthetic_combo() {
+        let t = std::thread::spawn(|| imp::record(&AtomicBool::new(false)));
+        sleep(Duration::from_millis(300));
+        unsafe {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, VIRTUAL_KEY,
+            };
+            let ev = |vk: u16, up: bool| INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 { ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(if up { 2 } else { 0 }),
+                    time: 0,
+                    dwExtraInfo: 0,
+                } },
+            };
+            for (vk, up) in [(0x11, false), (0x12, false), (0x7C, false), (0x7C, true), (0x12, true), (0x11, true)] {
+                let one = [ev(vk, up)];
+                SendInput(&one, std::mem::size_of::<INPUT>() as i32);
+                sleep(Duration::from_millis(20));
+            }
+        }
+        let got = t.join().unwrap();
+        assert_eq!(got.as_deref(), Ok("Ctrl+Alt+F13"), "recorder captured the wrong combo");
     }
 }
 

@@ -47,12 +47,14 @@ export function createSpeech(h: SpeechHandlers) {
 
   rec.onresult = (e: Rec) => {
     let interim = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
+    // The results list keeps earlier non-final phrases: rebuild the whole pending tail so the live
+    // preview never drops words that were already heard (resultIndex only marks what just changed).
+    for (let i = 0; i < e.results.length; i++) {
       const r = e.results[i];
       const t = String(r[0]?.transcript ?? "").trim();
       if (!t) continue;
       if (!firstWord) { firstWord = true; h.debug?.("first words"); }
-      if (r.isFinal) h.final(t);
+      if (r.isFinal) { if (i >= e.resultIndex) h.final(t); }
       else interim = `${interim} ${t}`.trim();
     }
     h.partial(interim);

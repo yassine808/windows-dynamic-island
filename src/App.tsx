@@ -174,7 +174,7 @@ function useStt() {
     let gone = false;
     const offs: Array<() => void> = [];
     const sub = (p: Promise<() => void>) => p.then((f) => (gone ? f() : offs.push(f))).catch(() => {});
-    sub(listen("stt://start", () => { if (!alive) return; reported = false; setStt((s) => ({ ...s, active: true, err: "" })); rec.start(); }));
+    sub(listen("stt://start", () => { if (!alive) return; reported = false; setStt((s) => ({ ...s, active: true, err: "", text: "", partial: "" })); rec.start(); }));
     sub(listen("stt://stop", () => rec.stop()));
     return () => { alive = false; gone = true; rec.abort(); offs.forEach((f) => f()); };
   }, []);
@@ -544,19 +544,26 @@ export default function App() {
     return () => removeEventListener("click", h, true);
   }, []);
 
-  // mouse wheel switches pages
-  const wheel = useRef({ acc: 0, t: 0, last: 0 });
+  // mouse wheel switches pages; scroll is never thrown away, so a long scroll walks to the last page
+  const wheel = useRef({ acc: 0, t: 0, last: 0, timer: 0 });
+  useEffect(() => () => clearTimeout(wheel.current.timer), []);
   const onWheel = (e: React.WheelEvent) => {
-    const now = performance.now(), s = wheel.current;
-    if (now - s.last > 250) s.acc = 0;
+    const s = wheel.current, now = performance.now();
+    if (now - s.last > 300) s.acc = 0; // a new gesture starts from rest
     s.last = now;
-    if (now - s.t < 450) return;
-    s.acc += e.deltaY;
-    if (Math.abs(s.acc) < 30) return;
-    const d = s.acc > 0 ? 1 : -1;
-    s.acc = 0; s.t = now;
-    setDir(d);
-    setPage((p) => Math.max(0, Math.min(PAGES - 1, p + d)));
+    s.acc = Math.max(-400, Math.min(400, s.acc + e.deltaY));
+    const tick = () => {
+      s.timer = 0;
+      if (Math.abs(s.acc) < 100) return;
+      const d = s.acc > 0 ? 1 : -1;
+      s.acc -= d * 100;
+      setDir(d);
+      setPage((p) => Math.max(0, Math.min(PAGES - 1, p + d)));
+      s.t = performance.now();
+      // a fast flick turns one page per frame-ish instead of skipping; the rest is not capped
+      if (Math.abs(s.acc) >= 100) s.timer = window.setTimeout(tick, 140);
+    };
+    if (!s.timer) s.timer = window.setTimeout(tick, Math.max(0, 140 - (now - s.t)));
   };
 
   // spring everything to its target
@@ -824,7 +831,7 @@ export default function App() {
                   <button className={`micbtn ${stt.active ? "on" : ""}`} data-dict="1" onClick={toggleStt}>{Icon.mic}</button>
                   <div className="col">
                     <div className="title">Dictation</div>
-                    <div className={`artist ${stt.err || recErr ? "err" : ""}`}>{stt.err || recErr || (rec ? "Press keys…" : cfg.hold ? "Hold to talk" : "Tap to talk")}</div>
+                    <div className={`artist ${stt.err || recErr ? "err" : ""}`}>{stt.err || recErr || (rec ? "Press keys…" : stt.active ? (stt.partial || "Listening…") : stt.text.trim() || (cfg.hold ? "Hold to talk" : "Tap to talk"))}</div>
                   </div>
                   <Bars playing={stt.active} level={stt.active ? level : undefined} />
                 </div>
