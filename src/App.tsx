@@ -11,8 +11,9 @@ type Tm = { total: number; left: number; end: number; running: boolean; done: bo
 type Mix = { vol: number; mute: boolean; mic: number; mic_mute: boolean; ok: boolean };
 type St = { cpu: number; ram: number; gpu: number; down: number; up: number };
 type Px = { hex: string; r: number; g: number; b: number };
+type MicInfo = { engine: boolean; perm: string };
 const PAGES = 7; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 tools, 6 settings
-const PAGE_H = [190, 138, 160, 140, 150, 230, 246];
+const PAGE_H = 250; // one card size for every page: no page shrinks or jumps between pages
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 // one wheel of the timer picker: scroll over it (or click the dim numbers) to change the value; wraps around
@@ -57,7 +58,7 @@ function sizeOf(m: Mode, v: boolean, peek: boolean, page = 0) {
   if (m === "media") return v ? { w: 37, h: 170, r: 18.5 } : { w: 250, h: 37, r: 18.5 };
   if (m === "timer") return v ? { w: 37, h: 126, r: 18.5 } : { w: 150, h: 37, r: 18.5 };
   if (m === "listening") return { w: 340, h: 84, r: 42 };
-  return { w: 370, h: PAGE_H[page] ?? 190, r: 44 };
+  return { w: 370, h: PAGE_H, r: 44 };
 }
 
 function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boolean, m: Rect) {
@@ -85,7 +86,16 @@ function useMedia() {
       try {
         const m = await invoke<Omit<NonNullable<Media>, "at"> | null>("media_poll");
         const now = performance.now();
-        setMedia((prev) => (!m ? null : now < freeze.current && prev ? { ...m, position: prev.position, at: prev.at } : { ...m, at: now }));
+        setMedia((prev) => {
+          if (!m) return null;
+          // Keep the old anchor while the player reports the same position. Resetting `at` on every
+          // one-second poll made a stale position stand still (and the remaining time drift away).
+          if (now < freeze.current && prev) return { ...m, position: prev.position, at: prev.at };
+          if (prev && prev.title === m.title && prev.artist === m.artist && prev.position === m.position && prev.duration === m.duration && prev.playing === m.playing) {
+            return { ...m, at: prev.at };
+          }
+          return { ...m, at: now };
+        });
         const k = m ? `${m.title}|${m.artist}` : "";
         if (k !== last.current) {
           last.current = k;
@@ -126,6 +136,7 @@ function useTint(art: string | null) {
 
 function useStt() {
   const [stt, setStt] = useState<Stt>({ active: false, partial: "", text: "", err: "" });
+  const [mic, setMic] = useState<MicInfo>({ engine: speechAvailable(), perm: "unknown" });
   const last = useRef("");
   const lastPartialLog = useRef(0);
   const local = useRef(false); // the browser engine is running the show (no WinRT polling then)
@@ -133,10 +144,15 @@ function useStt() {
     if (!TAURI) return;
     const ok = speechAvailable();
     local.current = ok;
+    setMic((m) => ({ ...m, engine: ok }));
     dbg(`stt: browser engine ${ok ? "available" : "missing"}`);
     // no audio involved: just report what WebView2 thinks of the microphone
     navigator.permissions?.query({ name: "microphone" as PermissionName })
-      .then((p) => dbg(`stt: mic permission ${p.state}`))
+      .then((p) => {
+        setMic((m) => ({ ...m, perm: p.state }));
+        p.onchange = () => setMic((m) => ({ ...m, perm: p.state }));
+        dbg(`stt: mic permission ${p.state}`);
+      })
       .catch(() => dbg("stt: mic permission unknown"));
     if (!ok) return;
     let alive = true;
@@ -194,7 +210,7 @@ function useStt() {
     }, 100);
     return () => clearInterval(id);
   }, []);
-  return { stt, setStt };
+  return { stt, setStt, mic };
 }
 
 function useMic(active: boolean, level: MotionValue<number>) {
@@ -260,8 +276,8 @@ const Bars = ({ playing, level }: { playing: boolean; level?: MotionValue<number
     </div>
   );
 
-// elapsed rounds down, remaining rounds up, so they always add up to the length (like iOS)
-const fmt = (ms: number, up = false) => { const s = Math.max(0, Math[up ? "ceil" : "floor"](ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+// both times round down, so the clock never runs ahead of the audio
+const fmt = (ms: number) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 function Progress({ m, scrub }: { m: NonNullable<Media>; scrub: number | null }) {
   const [, f] = useState(0);
   useEffect(() => { const id = setInterval(() => f((n) => n + 1), 250); return () => clearInterval(id); }, []);
@@ -274,7 +290,7 @@ function Progress({ m, scrub }: { m: NonNullable<Media>; scrub: number | null })
       <div className={`seek ${d ? "" : "off"} ${scrub != null ? "on" : ""}`}>
         <div className="track"><b style={{ width: d ? `${Math.min(100, (pos / d) * 100)}%` : "0%" }} /></div>
       </div>
-      {d > 0 && <span>-{fmt(d - pos, true)}</span>}
+      {d > 0 && <span>{fmt(d)}</span>}
     </div>
   );
 }
@@ -299,6 +315,7 @@ const Icon = {
   cam: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M9 4l-1.8 2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3.2L15 4H9zm3 4.5A4.5 4.5 0 1 1 7.5 13 4.5 4.5 0 0 1 12 8.5zm0 2A2.5 2.5 0 1 0 14.5 13 2.5 2.5 0 0 0 12 10.5z" /></svg>,
   drop: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2.5S5 10 5 14.5a7 7 0 0 0 14 0C19 10 12 2.5 12 2.5z" /></svg>,
   mic: <svg viewBox="0 0 24 24" width="20" height="20" fill="#fff"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z" /></svg>,
+  reset: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M4.5 10a8 8 0 1 1 2.2 6.4" /><path d="M4.5 4.5V10H10" /></svg>,
 };
 
 // play <-> pause morph, like SF Symbols' content transition
@@ -308,7 +325,7 @@ const glyphV = {
   exit: { scale: 0.55, opacity: 0, filter: "blur(4px)", transition: { duration: 0.14 } },
 } as const;
 
-// show the elapsed / remaining scrubber on the Media page (the iOS 17 layout). false = art, title and controls only
+// show the elapsed / total scrubber on the Media page (the iOS 17 layout). false = art, title and controls only
 const SCRUBBER = true;
 
 const pageV = {
@@ -320,10 +337,11 @@ const pageV = {
 export default function App() {
   const { media, art, setMedia, freeze } = useMedia();
   const tint = useTint(art);
-  const { stt, setStt } = useStt();
+  const { stt, setStt, mic } = useStt();
   const [page, setPage] = useState(0);
   const [dir, setDir] = useState(0);
   const [hover, setHover] = useState(false);
+  const [pin, setPin] = useState(false); // tray "Settings" keeps the card open until the user is done
   const [edge, setEdge] = useState<Edge>("top");
   const [tucked, setTucked] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -389,6 +407,16 @@ export default function App() {
   // (The browser demo has no registry, so it shows the shipping default.)
   const [autoOn, setAutoOn] = useState<boolean>(() => !TAURI);
   useEffect(() => { if (TAURI) invoke<boolean>("autostart_get").then(setAutoOn).catch(() => {}); }, []);
+  // The tray menu can flip the same Run value while the Settings page is closed.
+  useEffect(() => {
+    if (!TAURI) return;
+    let gone = false;
+    let un: (() => void) | undefined;
+    listen<boolean>("autostart://changed", (e) => setAutoOn(e.payload))
+      .then((f) => { if (gone) f(); else un = f; })
+      .catch(() => {});
+    return () => { gone = true; un?.(); };
+  }, []);
   const setAuto = (on: boolean) => {
     setAutoOn(on);
     call("autostart_set", { on }).catch((e) => { setAutoOn(!on); setRecErr(`Autostart: ${String(e)}`); });
@@ -402,6 +430,26 @@ export default function App() {
       .catch(() => {});
     return () => { gone = true; un?.(); };
   }, []);
+  // Tray icon: left click or "IslandWin Settings" opens the island on the Settings page and keeps
+  // it there long enough to use it without chasing the hover state.
+  useEffect(() => {
+    if (!TAURI) return;
+    let gone = false;
+    let un: (() => void) | undefined;
+    listen("show://settings", () => {
+      setDir(1);
+      setPage(6);
+      setTucked(false);
+      setPin(true);
+      invoke<boolean>("autostart_get").then(setAutoOn).catch(() => {});
+    }).then((f) => { if (gone) f(); else un = f; }).catch(() => {});
+    return () => { gone = true; un?.(); };
+  }, []);
+  useEffect(() => {
+    if (!pin) return;
+    const id = window.setTimeout(() => setPin(false), 12000);
+    return () => clearTimeout(id);
+  }, [pin]);
 
   // ---- mixer / stats / tools state ----
   const [mix, setMix] = useState<Mix>({ vol: 0.5, mute: false, mic: 0.8, mic_mute: false, ok: true });
@@ -471,72 +519,115 @@ export default function App() {
   useMic(stt.active, level);
 
   const vertical = edge === "left" || edge === "right";
-  const expanded = (hover || pick) && !dragging && (!!media || page > 0);
-  const mode: Mode = stt.active ? "listening" : expanded ? "expanded" : media ? "media" : timerActive ? "timer" : "idle";
+  const expanded = (hover || pick || pin) && !dragging;
+  // Hovering while dictating expands the full report; away from it, the compact island shows the words.
+  const mode: Mode = stt.active && !expanded ? "listening" : expanded ? "expanded" : media ? "media" : timerActive ? "timer" : "idle";
   const full = (stt.text + " " + stt.partial).trim();
   const done = stt.text.split(/\s+/).filter(Boolean), live = stt.partial.split(/\s+/).filter(Boolean);
   // a toggle can be triggered twice by one physical click; ignore the echo
   const gate = useRef(0);
   const once = () => { const n = performance.now(); if (n - gate.current < 350) return false; gate.current = n; return true; };
-  const toggleStt = () => !once() ? undefined : (TAURI ? call("stt_toggle") : setStt((s) => ({ ...s, active: !s.active, text: s.active ? s.text : "", partial: s.active ? "" : "Dictation preview, words appear as you speak" })));
+  const toggleStt = () => !once() ? undefined : (TAURI ? call("stt_toggle") : setStt((s) => ({ ...s, active: !s.active, text: s.active ? s.text : "Book a table for two", partial: s.active ? "" : "on Friday at seven" })));
 
   useEffect(() => { if (stt.active) { setDir(0); setPage(1); } }, [stt.active]);
   // refs read from the pointer handler and the timers below (they run outside React's render)
   const sttRef = useRef(stt); sttRef.current = stt;
   const holdRef = useRef(cfg.hold); holdRef.current = cfg.hold;
   useEffect(() => { if (TAURI) invoke<{ shortcut: string; hold: boolean }>("stt_settings").then(setCfg).catch(() => {}); }, []);
-  const pretty = (k: string) => k.split("+").map((p) => p.replace(/^Key|^Digit/, "").replace(/^Arrow/, "")).join(" + ");
+  const PRETTY: Record<string, string> = {
+    Escape: "Esc", ArrowLeft: "Left", ArrowUp: "Up", ArrowRight: "Right", ArrowDown: "Down",
+    MouseRight: "Right click", MouseMiddle: "Middle click", Mouse4: "Mouse 4", Mouse5: "Mouse 5",
+    NumpadMultiply: "Num *", NumpadAdd: "Num +", NumpadSubtract: "Num -", NumpadDecimal: "Num .",
+    NumpadDivide: "Num /", NumpadSeparator: "Num ,", NumpadEnter: "Num Enter", PrintScreen: "PrtSc",
+    PageUp: "PgUp", PageDown: "PgDn", ContextMenu: "Menu", Backquote: "`", Minus: "-", Equal: "=",
+  };
+  const pretty = (k: string) => k.split("+").map((p) => PRETTY[p] ??
+    (p.startsWith("Vk") ? `VK ${p.slice(2)}` : p.replace(/^Key/, "").replace(/^Digit/, "").replace(/^Numpad/, "Num "))).join(" + ");
+  const combo = (e: { ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean }, key: string) =>
+    [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super", key].filter(Boolean).join("+");
   const setHold = (hold: boolean) => { setCfg((c) => ({ ...c, hold })); call("set_stt_hold", { hold }); };
   const recordGate = useRef(0);
+  const recordSeq = useRef(0);
+  const resetShortcut = async () => {
+    recordSeq.current++;
+    setRecErr("");
+    if (rec) {
+      setRec(false);
+      if (TAURI) call("cancel_record_shortcut");
+    }
+    try {
+      const k = TAURI ? await invoke<string>("reset_shortcut") : "Ctrl+Alt+Space";
+      setCfg((c) => ({ ...c, shortcut: k }));
+      dbg(`shortcut reset: ${k}`);
+    } catch (e) {
+      setRecErr(String(e));
+      dbg(`shortcut reset failed: ${String(e)}`);
+    }
+  };
   const record = async () => {
     // Cancel is immediate (a second press on the chip must never be swallowed); only re-arming is debounced.
     if (rec) {
       dbg("shortcut record: cancelled from the UI");
+      recordSeq.current++;
+      setRec(false);
       if (TAURI) call("cancel_record_shortcut"); else recCancel.current?.();
       return;
     }
     const now = performance.now();
     if (now - recordGate.current < 400) return;
     recordGate.current = now;
+    const seq = ++recordSeq.current;
     setRecErr("");
     setRec(true);
-    dbg("shortcut record: armed, waiting for keys");
+    dbg("shortcut record: armed, waiting for a key or mouse button");
     if (TAURI) {
-      // A combo that is already taken or a bare letter sends you straight back to "press keys"
-      // instead of dropping out of recording, so the chip can always be reassigned.
-      for (let i = 0; i < 10; i++) {
-        try {
-          const k = await invoke<string>("record_shortcut");
-          setCfg((c) => ({ ...c, shortcut: k }));
-          setRecErr("");
-          dbg(`shortcut record: saved ${k}`);
-          break;
-        } catch (e) {
-          const msg = String(e);
-          if (msg === "cancelled") break;
-          setRecErr(msg);
-          dbg(`shortcut record: rejected (${msg})`);
-          if (!/add ctrl|not a shortcut|cannot be a shortcut|already|taken|register/i.test(msg)) break;
-          await new Promise((r) => setTimeout(r, 260));
-        }
+      try {
+        const k = await invoke<string>("record_shortcut");
+        if (seq !== recordSeq.current) return;
+        setCfg((c) => ({ ...c, shortcut: k }));
+        setRecErr("");
+        dbg(`shortcut record: saved ${k}`);
+      } catch (e) {
+        if (seq !== recordSeq.current) return;
+        const msg = String(e);
+        if (msg !== "cancelled") { setRecErr(msg); dbg(`shortcut record: rejected (${msg})`); }
       }
     } else {
       try {
         const k = await new Promise<string>((res, rej) => {
-          const h = (e: KeyboardEvent) => {
-            if (/^(Control|Shift|Alt|Meta)/.test(e.code)) return;
-            e.preventDefault(); removeEventListener("keydown", h); recCancel.current = null;
-            if (e.code === "Escape") return rej("cancelled");
-            res([e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super", e.code].filter(Boolean).join("+"));
+          const done = (k?: string) => {
+            removeEventListener("keydown", h, true);
+            removeEventListener("mousedown", m, true);
+            removeEventListener("contextmenu", ctx, true);
+            recCancel.current = null;
+            if (k == null) rej("cancelled"); else res(k);
           };
-          addEventListener("keydown", h);
-          recCancel.current = () => { removeEventListener("keydown", h); rej("cancelled"); };
+          const h = (e: KeyboardEvent) => {
+            if (e.repeat || /^(Control|Shift|Alt|Meta|OS|AltGraph)/.test(e.code)) return;
+            e.preventDefault(); e.stopPropagation();
+            done(combo(e, e.code));
+          };
+          const m = (e: MouseEvent) => {
+            if (e.button === 0) return; // left click is never a shortcut
+            e.preventDefault(); e.stopPropagation();
+            const button = e.button === 1 ? "MouseMiddle" : e.button === 2 ? "MouseRight" : e.button === 3 ? "Mouse4" : "Mouse5";
+            done(combo(e, button));
+          };
+          const ctx = (e: Event) => e.preventDefault();
+          addEventListener("keydown", h, true);
+          addEventListener("mousedown", m, true);
+          addEventListener("contextmenu", ctx, true);
+          recCancel.current = () => done();
         });
+        if (seq !== recordSeq.current) return;
         setCfg((c) => ({ ...c, shortcut: k }));
         dbg(`shortcut record: saved ${k}`);
-      } catch (e) { if (String(e) !== "cancelled") setRecErr(String(e)); }
+      } catch (e) {
+        if (seq !== recordSeq.current) return;
+        if (String(e) !== "cancelled") setRecErr(String(e));
+      }
     }
-    setRec(false);
+    if (seq === recordSeq.current) setRec(false);
   };
 
   // While recording, the island takes the keyboard (Rust lifts its no-activate style), so the
@@ -544,15 +635,27 @@ export default function App() {
   // elevated and a low-level hook gets nothing; Rust takes whichever source reports first.
   useEffect(() => {
     if (!TAURI || !rec) return;
+    const submit = (key: string) => call("record_submit", { key }).catch((err) => setRecErr(String(err)));
     const h = (e: KeyboardEvent) => {
-      if (e.repeat || /^(Control|Shift|Alt|Meta|OS)/.test(e.key)) return;
-      if (e.code === "Escape") { e.preventDefault(); call("cancel_record_shortcut"); return; }
+      if (e.repeat || /^(Control|Shift|Alt|Meta|OS|AltGraph)/.test(e.code)) return;
       e.preventDefault(); e.stopPropagation();
-      const parts = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super", e.code].filter(Boolean);
-      call("record_submit", { key: parts.join("+") }).catch((err) => setRecErr(String(err)));
+      submit(combo(e, e.code));
     };
+    const m = (e: MouseEvent) => {
+      if (e.button === 0) return; // left click is never a shortcut
+      e.preventDefault(); e.stopPropagation();
+      const button = e.button === 1 ? "MouseMiddle" : e.button === 2 ? "MouseRight" : e.button === 3 ? "Mouse4" : "Mouse5";
+      submit(combo(e, button));
+    };
+    const ctx = (e: Event) => e.preventDefault();
     addEventListener("keydown", h, true);
-    return () => removeEventListener("keydown", h, true);
+    addEventListener("mousedown", m, true);
+    addEventListener("contextmenu", ctx, true);
+    return () => {
+      removeEventListener("keydown", h, true);
+      removeEventListener("mousedown", m, true);
+      removeEventListener("contextmenu", ctx, true);
+    };
   }, [rec]);
 
   // live data only while the matching page is open
@@ -646,13 +749,14 @@ export default function App() {
   // tuck into the edge when idle (if that edge's axis is enabled)
   useEffect(() => {
     setTucked(false);
-    // a windowed fullscreen app in front (and the setting on): leave the screen to it
-    if (hideFs && fsApp === "windowed") { setTucked(true); return; }
+    // a windowed fullscreen app in front (and the setting on): leave the screen to it, unless the
+    // tray icon explicitly asked for Settings
+    if (hideFs && fsApp === "windowed" && !pin) { setTucked(true); return; }
     const can = edge === "top" || edge === "bottom" ? hideUD : hideLR;
-    if (!can || hover || dragging || stt.active || pick) return;
+    if (!can || hover || pin || dragging || stt.active || pick) return;
     const id = setTimeout(() => setTucked(true), 2500);
     return () => clearTimeout(id);
-  }, [edge, hover, dragging, stt.active, nonce, hideUD, hideLR, pick, hideFs, fsApp]);
+  }, [edge, hover, pin, dragging, stt.active, nonce, hideUD, hideLR, pick, hideFs, fsApp]);
 
   // report hit rect so Rust can toggle click-through; driven by the springs themselves, so an idle
   // island costs nothing instead of running a 60 Hz timer
@@ -897,23 +1001,48 @@ export default function App() {
                   <button className={`micbtn ${stt.active ? "on" : ""}`} data-dict="1" onClick={toggleStt}>{Icon.mic}</button>
                   <div className="col">
                     <div className="title">Dictation</div>
-                    <div className={`artist ${stt.err || recErr ? "err" : ""}`}>{stt.err || recErr || (rec ? "Press keys…" : stt.active ? (stt.partial || "Listening…") : stt.text.trim() || (cfg.hold ? "Hold to talk" : "Tap to talk"))}</div>
+                    <div className={`artist ${stt.err || recErr ? "err" : ""}`}>
+                      {recErr || stt.err || (rec ? "Press a key or mouse button…" : stt.active ? "Listening…" : stt.text.trim() ? `${done.length} words · Tap to talk` : cfg.hold ? "Hold to talk" : "Tap to talk")}
+                    </div>
                   </div>
                   <Bars playing={stt.active} level={stt.active ? level : undefined} />
                 </div>
-                <div className="cfg">
-                  <button className={`chip ${rec ? "rec" : ""}`} aria-label="Record shortcut" onClick={record}>
-                    <i className="dot" />{rec ? (recErr || "Press keys…") : pretty(cfg.shortcut)}
-                  </button>
-                  <div className="seg" role="group" aria-label="Shortcut mode">
-                    <button className={cfg.hold ? "on" : ""} onClick={() => setHold(true)}>Hold</button>
-                    <button className={cfg.hold ? "" : "on"} onClick={() => setHold(false)}>Toggle</button>
+                <div className="dictcard">
+                  {full
+                    ? <div className="tw">{done.map((t, i) => <span key={"d" + i} className="w">{t} </span>)}{live.map((t, i) => <span key={"l" + i + t} className="w hint">{t} </span>)}</div>
+                    : <div className="dicthint">{stt.active ? "Listening…" : cfg.hold ? "Hold the shortcut and talk. The words appear here as you speak." : "Press the shortcut and talk. The words appear here as you speak."}</div>}
+                </div>
+                <div className="dictfoot">
+                  <div className="microw">
+                    <i className={`micdot ${mic.engine && mic.perm !== "denied" ? "" : "warn"}`} />
+                    <span>{mic.engine ? (mic.perm === "denied" ? "Microphone blocked" : "Microphone ready") : "Windows speech"}</span>
+                    <span className="msep">·</span>
+                    <span>{mic.engine ? "Edge streaming" : "On-device WinRT"}</span>
+                  </div>
+                  <div className="cfg">
+                    <div className="chipgroup">
+                      <button className={`chip short ${rec ? "rec" : ""}`} aria-label="Record shortcut" onClick={record}>
+                        <i className="dot" />{rec ? (recErr || "Press keys or mouse…") : pretty(cfg.shortcut)}
+                      </button>
+                      <button className="chip reset" aria-label="Reset shortcut to Ctrl Alt Space" title="Reset to Ctrl + Alt + Space" onClick={resetShortcut}>{Icon.reset}</button>
+                    </div>
+                    <div className="seg" role="group" aria-label="Shortcut mode">
+                      <button className={cfg.hold ? "on" : ""} onClick={() => setHold(true)}>Hold</button>
+                      <button className={cfg.hold ? "" : "on"} onClick={() => setHold(false)}>Toggle</button>
+                    </div>
                   </div>
                 </div>
               </motion.div>
             )}
             {mode === "expanded" && page === 2 && (
               <motion.div key="ex2" className="row ex" custom={dir} {...vp}>
+                <div className="top">
+                  <div className="col">
+                    <div className="title">Timer</div>
+                    <div className="artist">{tm.done ? "Time's up" : tm.running ? "Running" : tm.left < tm.total ? "Paused" : "Set a countdown"}</div>
+                  </div>
+                  {!tmIdle && <button className="micbtn" aria-label={tm.running ? "Pause timer" : "Start timer"} onClick={tmToggle}>{tm.running ? Icon.pause : Icon.play}</button>}
+                </div>
                 {tmIdle ? (
                   <div className="top">
                     <div className="picker">
@@ -926,13 +1055,9 @@ export default function App() {
                     <button className="micbtn" aria-label="Start timer" onClick={tmToggle}>{Icon.play}</button>
                   </div>
                 ) : (
-                  <div className="top">
-                    <Ring frac={tm.total ? tm.left / tm.total : 0} size={46} done={tm.done} />
-                    <div className="col">
-                      <div className="title big">{tm.done ? "Done" : fmtT(tm.left)}</div>
-                      <div className="artist">{tm.running ? "Running" : tm.done ? "Time's up" : "Paused"}</div>
-                    </div>
-                    <button className="micbtn" aria-label={tm.running ? "Pause timer" : "Start timer"} onClick={tmToggle}>{tm.running ? Icon.pause : Icon.play}</button>
+                  <div className="timerbig">
+                    <Ring frac={tm.total ? tm.left / tm.total : 0} size={52} done={tm.done} />
+                    <div className="title big">{tm.done ? "Done" : fmtT(tm.left)}</div>
                   </div>
                 )}
                 <div className="cfg">
@@ -945,25 +1070,41 @@ export default function App() {
             )}
             {mode === "expanded" && page === 3 && (
               <motion.div key="ex3" className="row ex" custom={dir} {...vp}>
-                {([["vol", mix.vol, mix.mute, Icon.spk, Icon.spkOff, "Speakers"], ["mic", mix.mic, mix.mic_mute, Icon.mic, Icon.micOff, "Microphone"]] as const).map(([id, v, m, on, off, label]) => (
-                  <div className="mrow" key={id}>
-                    <button className={`mbtn ${m ? "off" : ""}`} aria-label={`Mute ${label}`} onClick={() => muteSet(id === "mic", !m)}>{m || v === 0 ? off : on}</button>
-                    <div className={`seek ${slOn === id ? "on" : ""}`} data-id={id}><div className="track"><b style={{ width: `${(m ? 0 : v) * 100}%` }} /></div></div>
-                    <span className="pct">{Math.round((m ? 0 : v) * 100)}</span>
+                <div className="top">
+                  <div className="col">
+                    <div className="title">Mixer</div>
+                    <div className="artist">Speakers and microphone · Default devices</div>
                   </div>
-                ))}
+                </div>
+                <div className="mixbody">
+                  {([["vol", mix.vol, mix.mute, Icon.spk, Icon.spkOff, "Speakers"], ["mic", mix.mic, mix.mic_mute, Icon.mic, Icon.micOff, "Microphone"]] as const).map(([id, v, m, on, off, label]) => (
+                    <div className="mrow" key={id}>
+                      <button className={`mbtn ${m ? "off" : ""}`} aria-label={`Mute ${label}`} onClick={() => muteSet(id === "mic", !m)}>{m || v === 0 ? off : on}</button>
+                      <div className={`seek ${slOn === id ? "on" : ""}`} data-id={id}><div className="track"><b style={{ width: `${(m ? 0 : v) * 100}%` }} /></div></div>
+                      <span className="pct">{Math.round((m ? 0 : v) * 100)}</span>
+                    </div>
+                  ))}
+                </div>
               </motion.div>
             )}
             {mode === "expanded" && page === 4 && (
               <motion.div key="ex4" className="row ex" custom={dir} {...vp}>
-                {([["CPU", st.cpu], ["RAM", st.ram], ["GPU", st.gpu]] as const).map(([n, v]) => (
-                  <div className="srow" key={n}>
-                    <span className="sl">{n}</span>
-                    <div className="sbar"><b style={{ width: `${Math.max(0, Math.min(100, v))}%`, background: load(v) }} /></div>
-                    <span className="sv">{v < 0 ? "n/a" : `${Math.round(v)}%`}</span>
+                <div className="top">
+                  <div className="col">
+                    <div className="title">System</div>
+                    <div className="artist">Live performance</div>
                   </div>
-                ))}
-                <div className="srow"><span className="sl">NET</span><span className="net">↓ {fmtB(st.down)}</span><span className="net">↑ {fmtB(st.up)}</span></div>
+                </div>
+                <div className="statbody">
+                  {([["CPU", st.cpu], ["RAM", st.ram], ["GPU", st.gpu]] as const).map(([n, v]) => (
+                    <div className="srow" key={n}>
+                      <span className="sl">{n}</span>
+                      <div className="sbar"><b style={{ width: `${Math.max(0, Math.min(100, v))}%`, background: load(v) }} /></div>
+                      <span className="sv">{v < 0 ? "n/a" : `${Math.round(v)}%`}</span>
+                    </div>
+                  ))}
+                  <div className="srow"><span className="sl">NET</span><span className="net">↓ {fmtB(st.down)}</span><span className="net">↑ {fmtB(st.up)}</span></div>
+                </div>
               </motion.div>
             )}
             {mode === "expanded" && page === 5 && (
@@ -987,7 +1128,7 @@ export default function App() {
                   <div className="col">
                     <div className="title">Settings</div>
                     <div className="artist">
-                      {hideFs && fsApp === "windowed" ? "Hidden: fullscreen app" : !hideUD && !hideLR ? "Always visible" : hideUD && hideLR ? "Hides on every edge" : hideUD ? "Hides when up or down" : "Hides when left or right"}
+                      {hideFs && fsApp === "windowed" ? "Hidden for a fullscreen app" : !hideUD && !hideLR ? "Always visible" : hideUD && hideLR ? "Hides on every edge" : hideUD ? "Hides when up or down" : "Hides when left or right"}
                       {autoOn ? " · Starts with Windows" : ""}
                     </div>
                   </div>
@@ -1008,8 +1149,8 @@ export default function App() {
                     </div>
                   </div>
                   <div className="cfg">
-                    <span className="hint">Fullscreen</span>
-                    <div className="seg" role="group" aria-label="Hide while a windowed fullscreen app is in front">
+                    <span className="hint" title="Hide the island while a fullscreen app or game is in front">Auto-hide in fullscreen</span>
+                    <div className="seg" role="group" aria-label="Auto-hide while a fullscreen app is in front">
                       <button className={hideFs ? "" : "on"} onClick={() => setHideFsPref(false)}>Off</button>
                       <button className={hideFs ? "on" : ""} onClick={() => setHideFsPref(true)}>On</button>
                     </div>

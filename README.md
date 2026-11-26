@@ -29,10 +29,13 @@ Upgrading or uninstalling never touches your data:
 
 | What | Where |
 | --- | --- |
-| Settings (shortcut, hold/toggle) | `%APPDATA%\dev.yassine808.islandwin\settings.json` |
-| Log (app + dictation timings) | `%APPDATA%\dev.yassine808.islandwin\logs\islandwin.log` |
+| Settings (shortcut, hold/toggle) | `%APPDATA%\Windows Dynamic Island\settings.json` |
+| Log (app + dictation timings) | `%APPDATA%\Windows Dynamic Island\logs\islandwin.log` |
 | UI preferences (edge, auto-hide) | the webview's local storage for the app |
 | Autostart | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\IslandWin` |
+
+The first launch of this version copies the old `%APPDATA%\dev.yassine808.islandwin` settings and log
+into the new folder; the old folder is left in place.
 
 ## Use
 
@@ -42,21 +45,25 @@ Upgrading or uninstalling never touches your data:
   vertical and tucks away when idle.
 - Scroll the mouse wheel over the island to switch pages; a long scroll keeps going to the last page.
 - Dictation shortcut defaults to `Ctrl+Alt+Space`. On the Dictation page, click the shortcut chip and
-  press the combo you want. The island takes the keyboard for a moment so the capture also works over
-  a fullscreen game or an elevated window, and Escape cancels. The chip stays armed if a combo is
-  taken and asks for another one. Hold / Toggle picks push-to-talk or press-to-start/stop.
+  press any key or any mouse button (bare keys work; left click is never recorded). The island takes
+  the keyboard for a moment so the capture also works over a fullscreen game or an elevated window.
+  Click the chip again to cancel. The red reset button puts `Ctrl+Alt+Space` back. Hold / Toggle picks
+  push-to-talk or press-to-start/stop.
 - Finished phrases are typed into whatever text field has focus. Needs
   Settings > Privacy > Speech > Online speech recognition.
 - Timer: pick 5, 15 or 25 minutes (starts right away) or set any time on the wheels; pause with the
   button. It keeps running in the collapsed island and beeps when done.
 - Cursor stays the normal arrow while hovering; it only becomes a grabbing hand during an actual drag.
-- Set `SCRUBBER = false` in `src/App.tsx` to hide the elapsed/remaining bar.
+- Set `SCRUBBER = false` in `src/App.tsx` to hide the elapsed/total bar.
+- The notification-area icon opens Settings on left click. Right click shows Settings, Start with
+  Windows (the same switch as the Settings page) and Quit. Windows hides new tray icons behind the
+  `^` overflow until you pin them to the taskbar.
 
 ## Pages
 
 Media, Dictation, Timer, Mixer, Stats, Tools, Settings.
 
-- **Settings**: auto-hide per axis (up/down, left/right), hide while a windowed fullscreen app is in
+- **Settings**: auto-hide per axis (up/down, left/right), auto-hide while a fullscreen app is in
   front, and Start with Windows.
 - **Mixer**: speaker and mic volume sliders with mute buttons (default devices).
 - **Stats**: CPU, RAM, network, and GPU (NVIDIA only, needs `nvidia-smi`; shows n/a otherwise).

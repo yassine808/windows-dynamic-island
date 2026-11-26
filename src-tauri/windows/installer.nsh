@@ -1,5 +1,5 @@
 ; Extra installer steps for the NSIS setup.exe.
-; Settings live in %APPDATA%\dev.yassine808.islandwin and logs in the logs\ folder beside them, so
+; Settings live in %APPDATA%\Windows Dynamic Island and logs in the logs\ folder beside them, so
 ; they survive upgrades and uninstalls; only the program itself lives in the install directory.
 
 ; "Start with Windows" is on out of the box, like a pre-ticked box. The same switch is on the

@@ -1,12 +1,18 @@
 // Start with Windows. The setup enables it, and the same setting can be flipped any time from the
 // Settings page. One HKCU Run value, so no administrator rights are needed.
 #[tauri::command]
-pub fn autostart_get() -> bool { imp::enabled() }
+pub fn autostart_get() -> bool { get() }
 
 #[tauri::command]
-pub fn autostart_set(on: bool) -> Result<(), String> {
+pub fn autostart_set(on: bool) -> Result<(), String> { set(on) }
+
+pub fn get() -> bool { imp::enabled() }
+
+pub fn set(on: bool) -> Result<(), String> {
     logf!("autostart", "{}", if on { "enabling" } else { "disabling" });
-    imp::set(on)
+    imp::set(on)?;
+    crate::tray::sync_autostart(on);
+    Ok(())
 }
 
 /// Keep the entry pointing at the exe that is actually running (a reinstall can move it).

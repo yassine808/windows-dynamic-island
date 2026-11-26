@@ -1,5 +1,5 @@
 // Append-only log file so the island can be inspected after the fact.
-// Default: %APPDATA%\dev.yassine808.islandwin\logs\islandwin.log (beside settings.json, outside the
+// Default: %APPDATA%\Windows Dynamic Island\logs\islandwin.log (beside settings.json, outside the
 // install folder so an upgrade keeps it). Override the path with ISLANDWIN_LOG.
 use std::{
     fs::{self, File, OpenOptions},
@@ -18,12 +18,7 @@ pub fn path() -> PathBuf {
         return PathBuf::from(p);
     }
     // Beside settings.json, outside the install directory: an upgrade or uninstall keeps it.
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("dev.yassine808.islandwin")
-        .join("logs")
-        .join("islandwin.log")
+    crate::paths::data_dir().join("logs").join("islandwin.log")
 }
 
 #[cfg(windows)]
@@ -42,12 +37,7 @@ fn stamp() -> String {
 pub fn init() {
     let p = path();
     if let Some(d) = p.parent() { let _ = fs::create_dir_all(d); }
-    // carry the log over from the old per-install location once, so history is not lost
-    if !p.exists() {
-        if let Some(old) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).map(|d| d.join("islandwin").join("islandwin.log")) {
-            if old.exists() { let _ = fs::copy(&old, &p); }
-        }
-    }
+    // old settings and logs were copied by paths::migrate() before this runs
     // keep one previous file once the log grows past 5 MB
     if fs::metadata(&p).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {
         let _ = fs::rename(&p, p.with_extension("old.log"));

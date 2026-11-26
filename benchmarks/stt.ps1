@@ -1,7 +1,7 @@
 # Dictation latency benchmark. Reads the app log, reconstructs every dictation session and records how
 # long each stage took. See README.md for what the columns mean.
 param(
-  [string]$Log = $(if (Test-Path (Join-Path $env:APPDATA "dev.yassine808.islandwin\logs\islandwin.log")) { Join-Path $env:APPDATA "dev.yassine808.islandwin\logs\islandwin.log" } else { Join-Path $env:LOCALAPPDATA "islandwin\islandwin.log" }),
+  [string]$Log = $(if (Test-Path (Join-Path $env:APPDATA "Windows Dynamic Island\logs\islandwin.log")) { Join-Path $env:APPDATA "Windows Dynamic Island\logs\islandwin.log" } elseif (Test-Path (Join-Path $env:APPDATA "dev.yassine808.islandwin\logs\islandwin.log")) { Join-Path $env:APPDATA "dev.yassine808.islandwin\logs\islandwin.log" } else { Join-Path $env:LOCALAPPDATA "islandwin\islandwin.log" }),
   [switch]$Csv,
   [int]$Last = 20
 )

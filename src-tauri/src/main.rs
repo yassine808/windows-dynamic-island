@@ -10,13 +10,14 @@ mod hotkey;
 mod logger;
 mod media;
 mod mixer;
+mod paths;
 mod stats;
 mod stt;
 mod tools;
+mod tray;
 
 use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
-use tauri_plugin_global_shortcut::ShortcutState;
 
 #[derive(Default)]
 struct Hit { r: [f64; 4], dragging: bool, p: (f64, f64, bool, bool), mons: Vec<[f64; 4]> }
@@ -119,7 +120,9 @@ fn log(msg: String) { logf!("js", "{msg}"); }
 fn set_dragging(st: State<Shared>, on: bool) { st.lock().unwrap().dragging = on; }
 
 fn main() {
+    paths::migrate();
     logger::init();
+    logf!("boot", "data folder: {}", paths::data_dir().display());
     if already_running() {
         logf!("boot", "another islandwin instance is already running, exiting");
         return;
@@ -138,25 +141,11 @@ fn main() {
             tauri::webview::PermissionKind::Microphone => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
         })
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|_app, _sc, ev| match ev.state() {
-                    // hold = push-to-talk (listen while the key is down); otherwise press to start, press to stop
-                    ShortcutState::Pressed => {
-                        logf!("hotkey", "shortcut pressed (hold={})", stt::hold());
-                        if stt::hold() { stt::start() } else { stt::toggle() }
-                    }
-                    ShortcutState::Released => {
-                        if stt::hold() { logf!("hotkey", "shortcut released (hold) -> stop"); stt::stop() }
-                    }
-                })
-                .build(),
-        )
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
             media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_dragging, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
             stt::stt_engine, stt::stt_ended, stt::stt_type,
-            hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::record_submit, hotkey::cancel_record_shortcut,
+            hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::record_submit, hotkey::cancel_record_shortcut, hotkey::reset_shortcut,
 autostart::autostart_get, autostart::autostart_set,
             stats::stats, mixer::mixer_get, mixer::mixer_set_vol, mixer::mixer_set_mute,
             tools::clip_list, tools::clip_copy, tools::clip_clear, tools::set_clipboard, tools::pixel_at_cursor, tools::screenshot
@@ -164,8 +153,9 @@ autostart::autostart_get, autostart::autostart_set,
         .setup(move |app| {
             logf!("win", "setup: initialising the dictation shortcut");
             stt::bind(app.handle().clone());
-            hotkey::init(app.handle());
+            hotkey::init();
             autostart::init();
+            if let Err(e) = tray::init(app.handle()) { logf!("tray", "could not add the tray icon: {e}"); }
             logf!("win", "setup: starting stats and tools");
             stats::start();
             tools::init();

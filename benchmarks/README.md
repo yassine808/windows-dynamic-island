@@ -37,7 +37,8 @@ Get-Process islandwin | Select-Object Id
 
 ### Method
 
-`stt.ps1` reads `%LOCALAPPDATA%\islandwin\islandwin.log` and rebuilds every dictation session from its
+`stt.ps1` reads `%APPDATA%\Windows Dynamic Island\logs\islandwin.log` (falling back to the old
+`dev.yassine808.islandwin` log) and rebuilds every dictation session from its
 lifecycle lines, using the log's boot-relative `+ N.NNNs` offsets so boot restarts cannot skew a delta.
 One row per press:
 
