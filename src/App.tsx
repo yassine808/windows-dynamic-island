@@ -6,14 +6,14 @@ import { createSpeech, speechAvailable } from "./speech";
 
 type Media = { title: string; artist: string; playing: boolean; position: number; duration: number; at: number } | null;
 type Stt = { active: boolean; partial: string; text: string; err: string };
-type Mode = "idle" | "media" | "listening" | "expanded" | "timer";
+type Mode = "idle" | "media" | "listening" | "alarm" | "expanded" | "timer";
 type Tm = { total: number; left: number; end: number; running: boolean; done: boolean };
 type Mix = { vol: number; mute: boolean; mic: number; mic_mute: boolean; ok: boolean };
 type St = { cpu: number; ram: number; gpu: number; down: number; up: number };
-type Px = { hex: string; r: number; g: number; b: number };
 type MicInfo = { engine: boolean; perm: string };
-const PAGES = 7; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 tools, 6 settings
-const PAGE_H = 250; // one card size for every page: no page shrinks or jumps between pages
+const PAGES = 6; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 settings
+// Each page keeps its own height. The dictation report and the settings rows need more room.
+const PAGE_H = [190, 236, 160, 140, 150, 286];
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 // one wheel of the timer picker: scroll over it (or click the dim numbers) to change the value; wraps around
@@ -46,6 +46,8 @@ type Rect = { x: number; y: number; w: number; h: number };
 type P = { x: number; y: number; down: boolean; inside: boolean };
 
 const TAURI = "__TAURI_INTERNALS__" in window;
+// Browser preview only: `?nomedia` starts with nothing playing, so the idle clock can be checked.
+const DEMO = !TAURI && !new URLSearchParams(location.search).has("nomedia");
 const dbg = (m: string) => TAURI && invoke("log", { msg: m });
 const call = (c: string, a?: Record<string, unknown>) => (TAURI ? invoke(c, a) : Promise.resolve(null));
 const spring = { type: "spring", stiffness: 380, damping: 28, mass: 0.9 } as const;
@@ -57,8 +59,8 @@ function sizeOf(m: Mode, v: boolean, peek: boolean, page = 0) {
   if (m === "idle") return peek ? (v ? { w: 44, h: 150, r: 22 } : { w: 150, h: 44, r: 22 }) : v ? { w: 37, h: 126, r: 18.5 } : { w: 126, h: 37, r: 18.5 };
   if (m === "media") return v ? { w: 37, h: 170, r: 18.5 } : { w: 250, h: 37, r: 18.5 };
   if (m === "timer") return v ? { w: 37, h: 126, r: 18.5 } : { w: 150, h: 37, r: 18.5 };
-  if (m === "listening") return { w: 340, h: 84, r: 42 };
-  return { w: 370, h: PAGE_H, r: 44 };
+  if (m === "listening" || m === "alarm") return { w: 340, h: 84, r: 42 };
+  return { w: 370, h: PAGE_H[page] ?? 190, r: 44 };
 }
 
 function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boolean, m: Rect) {
@@ -76,8 +78,8 @@ function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boo
 const demoArt = "data:image/svg+xml;utf8," + encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop stop-color='#ff375f'/><stop offset='1' stop-color='#5e5ce6'/></linearGradient></defs><rect width='64' height='64' fill='url(#g)'/></svg>`);
 
 function useMedia() {
-  const [media, setMedia] = useState<Media>(TAURI ? null : { title: "Blinding Lights", artist: "The Weeknd", playing: true, position: 42000, duration: 215000, at: performance.now() });
-  const [art, setArt] = useState<string | null>(TAURI ? null : demoArt);
+  const [media, setMedia] = useState<Media>(DEMO ? { title: "Blinding Lights", artist: "The Weeknd", playing: true, position: 42000, duration: 215000, at: performance.now() } : null);
+  const [art, setArt] = useState<string | null>(DEMO ? demoArt : null);
   const last = useRef("");
   const freeze = useRef(0); // after a seek, ignore the (stale) polled position for a moment
   useEffect(() => {
@@ -238,18 +240,88 @@ function useMic(active: boolean, level: MotionValue<number>) {
 }
 
 const fmtT = (s: number) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(x).padStart(2, "0")}`; };
-const beep = () => {
+
+// One audio context for the timer alarm, primed by the play button so the first chime can start
+// even after a long countdown (browsers otherwise block audio that has no user gesture behind it).
+let alarmCtx: AudioContext | null = null;
+const primeAlarm = () => {
   try {
-    const c = new AudioContext();
-    [0, 0.25, 0.5].forEach((t) => {
-      const o = c.createOscillator(), g = c.createGain(), at = c.currentTime + t;
-      o.frequency.value = 880;
-      g.gain.setValueAtTime(0.15, at); g.gain.exponentialRampToValueAtTime(0.001, at + 0.18);
-      o.connect(g).connect(c.destination); o.start(at); o.stop(at + 0.2);
-    });
-    setTimeout(() => c.close(), 1200);
+    alarmCtx ??= new AudioContext();
+    if (alarmCtx.state === "suspended") void alarmCtx.resume();
   } catch {}
 };
+// A soft iOS-style two-phrase chime with a little space around it. It repeats until the caller
+// invokes the returned stop function; there is no automatic timeout.
+function startAlarmSound() {
+  primeAlarm();
+  const ctx = alarmCtx;
+  if (!ctx) return () => {};
+  const master = ctx.createGain();
+  const dry = ctx.createGain();
+  const wet = ctx.createGain();
+  const delay = ctx.createDelay(0.5);
+  const feedback = ctx.createGain();
+  dry.gain.value = 0.16;
+  wet.gain.value = 0.07;
+  delay.delayTime.value = 0.23;
+  feedback.gain.value = 0.24;
+  dry.connect(master);
+  delay.connect(feedback).connect(delay);
+  delay.connect(wet).connect(master);
+  master.connect(ctx.destination);
+  let stopped = false;
+  const note = (freq: number, at: number, len: number, gain: number) => {
+    const a = ctx.createOscillator(), b = ctx.createOscillator(), g = ctx.createGain();
+    a.type = "sine";
+    a.frequency.value = freq;
+    b.type = "triangle";
+    b.frequency.value = freq * 2.002;
+    const end = at + len;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(gain, at + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, end);
+    a.connect(g); b.connect(g); g.connect(dry); g.connect(delay);
+    a.start(at); b.start(at); a.stop(end + 0.02); b.stop(end + 0.02);
+  };
+  const ring = () => {
+    if (stopped) return;
+    const t = ctx.currentTime + 0.04;
+    const notes: [number, number, number, number][] = [
+      [659.25, 0.00, 0.55, 0.10], [987.77, 0.16, 0.55, 0.09], [1318.51, 0.32, 0.85, 0.075],
+      [987.77, 0.62, 0.45, 0.055], [659.25, 1.05, 0.55, 0.09], [987.77, 1.21, 0.55, 0.08],
+      [1318.51, 1.37, 0.95, 0.07],
+    ];
+    notes.forEach(([f, o, l, g]) => note(f, t + o, l, g));
+  };
+  ring();
+  const id = window.setInterval(ring, 3400);
+  return () => {
+    stopped = true;
+    clearInterval(id);
+    try {
+      master.gain.cancelScheduledValues(ctx.currentTime);
+      master.gain.setTargetAtTime(0, ctx.currentTime, 0.04);
+    } catch {}
+    window.setTimeout(() => { try { master.disconnect(); } catch {} }, 600);
+  };
+}
+
+const clock12 = (d: Date, short = false) => {
+  const t = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  return short ? t.replace(/\s*[AP]M$/i, "") : t;
+};
+function ClockText({ short }: { short?: boolean }) {
+  const [d, setD] = useState(() => new Date());
+  useEffect(() => { const id = setInterval(() => setD(new Date()), 1000); return () => clearInterval(id); }, []);
+  return <span className="pilltime">{clock12(d, short)}</span>;
+}
+function ProgressText({ m }: { m: NonNullable<Media> }) {
+  const [, f] = useState(0);
+  useEffect(() => { const id = setInterval(() => f((n) => n + 1), 500); return () => clearInterval(id); }, []);
+  const d = m.duration > 0 ? m.duration : 0;
+  const pos = Math.min(d || 1e12, Math.max(0, m.position + (m.playing ? performance.now() - m.at : 0)));
+  return <span className="pilltime">{fmt(pos)}</span>;
+}
 const Ring = ({ frac, size, done }: { frac: number; size: number; done?: boolean }) => {
   const sw = size > 30 ? 4 : 3, rr = (size - sw) / 2, c = 2 * Math.PI * rr;
   return (
@@ -313,7 +385,7 @@ const Icon = {
   spkOff: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z" /><path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" /></svg>,
   micOff: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z" /><path d="M4 4l16 16" stroke="#000" strokeWidth="4.5" strokeLinecap="round" /><path d="M4 4l16 16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>,
   cam: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M9 4l-1.8 2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3.2L15 4H9zm3 4.5A4.5 4.5 0 1 1 7.5 13 4.5 4.5 0 0 1 12 8.5zm0 2A2.5 2.5 0 1 0 14.5 13 2.5 2.5 0 0 0 12 10.5z" /></svg>,
-  drop: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2.5S5 10 5 14.5a7 7 0 0 0 14 0C19 10 12 2.5 12 2.5z" /></svg>,
+  bell: <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 2a2 2 0 0 0-2 2v.55C6.9 5.6 5 8.35 5 11.65V16l-2 2v1h18v-1l-2-2v-4.35c0-3.3-1.9-6.05-5-7.1V4a2 2 0 0 0-2-2zm0 20a3 3 0 0 0 3-3H9a3 3 0 0 0 3 3z" /></svg>,
   mic: <svg viewBox="0 0 24 24" width="20" height="20" fill="#fff"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z" /></svg>,
   reset: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M4.5 10a8 8 0 1 1 2.2 6.4" /><path d="M4.5 4.5V10H10" /></svg>,
 };
@@ -354,31 +426,34 @@ export default function App() {
   const [tm, setTm] = useState<Tm>({ total: 25 * 60, left: 25 * 60, end: 0, running: false, done: false });
   const timerActive = tm.running || tm.done;
   const leftNow = (t: Tm) => Math.max(0, Math.ceil((t.end - Date.now()) / 1000));
-  const tmStart = (sec: number) => setTm({ total: sec, left: sec, end: Date.now() + sec * 1000, running: true, done: false });
-  const tmToggle = () => setTm((t) => {
-    if (t.running) return { ...t, running: false, left: leftNow(t) || t.total };
-    const left = t.done || t.left <= 0 ? t.total : t.left;
-    if (left <= 0) return t;
-    return { ...t, left, end: Date.now() + left * 1000, running: true, done: false };
-  });
+  const tmToggle = () => {
+    primeAlarm();
+    setTm((t) => {
+      if (t.running) return { ...t, running: false, left: leftNow(t) || t.total };
+      const left = t.done || t.left <= 0 ? t.total : t.left;
+      if (left <= 0) return t;
+      return { ...t, left, end: Date.now() + left * 1000, running: true, done: false };
+    });
+  };
   const tmSet = (total: number) => setTm((t) => ({ ...t, total, left: total, running: false, done: false }));
   const tmIdle = !tm.running && !tm.done && tm.left === tm.total;
-  const tmH = Math.floor(tm.total / 3600), tmM = Math.floor((tm.total % 3600) / 60), tmS = tm.total % 60;
+  const tmH = Math.floor(tm.total / 3600), tmM = Math.floor((tm.total % 3600) / 60);
   const tmReset = () => setTm((t) => ({ ...t, left: t.total, running: false, done: false }));
   useEffect(() => {
     if (!tm.running) return;
     const id = setInterval(() => setTm((t) => {
       if (!t.running) return t;
       const left = leftNow(t);
-      if (left <= 0) { beep(); return { ...t, left: 0, running: false, done: true }; }
+      if (left <= 0) return { ...t, left: 0, running: false, done: true };
       return left === t.left ? t : { ...t, left };
     }), 250);
     return () => clearInterval(id);
   }, [tm.running]);
+  // Ring until the user presses Stop: no quiet auto-dismiss after a few seconds.
   useEffect(() => {
     if (!tm.done) return;
-    const id = setTimeout(() => setTm((t) => ({ ...t, left: t.total, done: false })), 8000);
-    return () => clearTimeout(id);
+    const stop = startAlarmSound();
+    return stop;
   }, [tm.done]);
 
   // Auto-hide per axis: top/bottom and left/right are toggled separately. Reads the old single
@@ -402,6 +477,14 @@ export default function App() {
   const setHideFsPref = (v: boolean) => {
     setHideFs(v);
     try { localStorage.setItem("hideFS", v ? "on" : "off"); } catch {}
+  };
+  // Lock the island in place: buttons and scrolling still work, but a drag on the card does nothing.
+  const [posLock, setPosLock] = useState<boolean>(() => {
+    try { return localStorage.getItem("posLock") === "on"; } catch { return false; }
+  });
+  const setPosLockPref = (v: boolean) => {
+    setPosLock(v);
+    try { localStorage.setItem("posLock", v ? "on" : "off"); } catch {}
   };
   // Start with Windows: the setup turns it on while installing, this switch flips the same Run value.
   // (The browser demo has no registry, so it shows the shipping default.)
@@ -438,7 +521,7 @@ export default function App() {
     let un: (() => void) | undefined;
     listen("show://settings", () => {
       setDir(1);
-      setPage(6);
+      setPage(5);
       setTucked(false);
       setPin(true);
       invoke<boolean>("autostart_get").then(setAutoOn).catch(() => {});
@@ -451,19 +534,12 @@ export default function App() {
     return () => clearTimeout(id);
   }, [pin]);
 
-  // ---- mixer / stats / tools state ----
+  // ---- mixer / stats state ----
   const [mix, setMix] = useState<Mix>({ vol: 0.5, mute: false, mic: 0.8, mic_mute: false, ok: true });
   const [slOn, setSlOn] = useState<string | null>(null);
   const [st, setSt] = useState<St>({ cpu: 0, ram: 0, gpu: -1, down: 0, up: 0 });
-  const [clips, setClips] = useState<string[]>(TAURI ? [] : ["Hello world", "https://example.com/some/long/link"]);
-  const [pick, setPick] = useState(false);
-  const [px, setPx] = useState<Px | null>(null);
-  const [note, setNote] = useState("");
   const mixFreeze = useRef(0);
   const sendT = useRef<Record<string, number>>({});
-  const pickRef = useRef(false), pxRef = useRef<Px | null>(null), noteT = useRef(0);
-  pickRef.current = pick; pxRef.current = px;
-  const flash = (t: string) => { setNote(t); clearTimeout(noteT.current); noteT.current = window.setTimeout(() => setNote(""), 3000); };
   const slider = (id: "vol" | "mic", f: number, commit: boolean) => {
     f = clamp01(f);
     const now = performance.now();
@@ -477,21 +553,6 @@ export default function App() {
     setMix((m) => ({ ...m, [mic ? "mic_mute" : "mute"]: on }));
     call("mixer_set_mute", { mic, on });
   };
-  const shot = async () => {
-    if (!TAURI) return flash("Needs the desktop app");
-    flash("Capturing…");
-    try { await invoke<string>("screenshot"); flash("Saved to Pictures/IslandWin"); } catch (e) { flash(String(e)); }
-  };
-  const clipCopy = (i: number) => { call("clip_copy", { i }); flash("Copied"); };
-  const clipClear = () => { setClips([]); call("clip_clear"); };
-  const togglePick = () => { setPx(null); setPick((v) => !v); };
-  const commitPick = () => {
-    const c = pxRef.current;
-    pickRef.current = false; setPick(false);
-    if (c) { call("set_clipboard", { text: c.hex }); flash(`Copied ${c.hex}`); }
-  };
-  const commitPickRef = useRef(commitPick);
-  commitPickRef.current = commitPick;
   const mediaRef = useRef(media);
   mediaRef.current = media;
   const flyKey = useRef("");
@@ -519,9 +580,18 @@ export default function App() {
   useMic(stt.active, level);
 
   const vertical = edge === "left" || edge === "right";
-  const expanded = (hover || pick || pin) && !dragging;
+  // A fullscreen window or app takes the whole screen; the island gets out of the way completely.
+  // An alarm always stays visible: it has to be reachable to press Stop, even over a fullscreen app.
+  const fsHide = hideFs && fsApp !== "none" && !pin && !tm.done;
+  useEffect(() => {
+    if (!TAURI) return;
+    const why = fsHide ? "island hidden" : pin && fsApp !== "none" ? "settings pinned" : tm.done && fsApp !== "none" ? "alarm visible" : "island visible";
+    dbg(`fullscreen: ${fsApp} (${why})`);
+  }, [fsApp, fsHide, pin, tm.done]);
+  // The alarm must stay visible until Stop is pressed, so hovering does not open another page over it.
+  const expanded = (hover || pin) && !dragging && !tm.done;
   // Hovering while dictating expands the full report; away from it, the compact island shows the words.
-  const mode: Mode = stt.active && !expanded ? "listening" : expanded ? "expanded" : media ? "media" : timerActive ? "timer" : "idle";
+  const mode: Mode = tm.done ? "alarm" : stt.active && !expanded ? "listening" : expanded ? "expanded" : media ? "media" : timerActive ? "timer" : "idle";
   const full = (stt.text + " " + stt.partial).trim();
   const done = stt.text.split(/\s+/).filter(Boolean), live = stt.partial.split(/\s+/).filter(Boolean);
   // a toggle can be triggered twice by one physical click; ignore the echo
@@ -533,6 +603,7 @@ export default function App() {
   // refs read from the pointer handler and the timers below (they run outside React's render)
   const sttRef = useRef(stt); sttRef.current = stt;
   const holdRef = useRef(cfg.hold); holdRef.current = cfg.hold;
+  const posLockRef = useRef(posLock); posLockRef.current = posLock;
   useEffect(() => { if (TAURI) invoke<{ shortcut: string; hold: boolean }>("stt_settings").then(setCfg).catch(() => {}); }, []);
   const PRETTY: Record<string, string> = {
     Escape: "Esc", ArrowLeft: "Left", ArrowUp: "Up", ArrowRight: "Right", ArrowDown: "Down",
@@ -682,26 +753,6 @@ export default function App() {
     const id = setInterval(f, 1000);
     return () => { on = false; clearInterval(id); };
   }, [open, page]);
-  useEffect(() => {
-    if (!open || page !== 5 || !TAURI) return;
-    let on = true;
-    const f = async () => { try { const l = await invoke<string[]>("clip_list"); if (on) setClips(l); } catch {} };
-    f();
-    const id = setInterval(f, 600);
-    return () => { on = false; clearInterval(id); };
-  }, [open, page]);
-  useEffect(() => {
-    if (!pick || !TAURI) return;
-    let on = true, busy = false;
-    const id = setInterval(async () => {
-      if (busy) return;
-      busy = true;
-      try { const c = await invoke<Px | null>("pixel_at_cursor"); if (on && c) setPx(c); } catch {}
-      busy = false;
-    }, 50);
-    return () => { on = false; clearInterval(id); };
-  }, [pick]);
-
   // Tauri: Rust already turns every click into a synthetic one (see get_ptr loop). Drop the webview's own real click,
   // otherwise toggle buttons (mic, record shortcut) fire twice and flip straight back.
   useEffect(() => {
@@ -727,10 +778,10 @@ export default function App() {
       setDir(d);
       setPage((p) => Math.max(0, Math.min(PAGES - 1, p + d)));
       s.t = performance.now();
-      // a fast flick turns one page per frame-ish instead of skipping; the rest is not capped
-      if (Math.abs(s.acc) >= 100) s.timer = window.setTimeout(tick, 140);
+      // one page per beat; a long gesture still reaches the last page, but it never skips pages
+      if (Math.abs(s.acc) >= 100) s.timer = window.setTimeout(tick, 320);
     };
-    if (!s.timer) s.timer = window.setTimeout(tick, Math.max(0, 140 - (now - s.t)));
+    if (!s.timer) s.timer = window.setTimeout(tick, Math.max(0, 320 - (now - s.t)));
   };
 
   // spring everything to its target
@@ -749,19 +800,24 @@ export default function App() {
   // tuck into the edge when idle (if that edge's axis is enabled)
   useEffect(() => {
     setTucked(false);
-    // a windowed fullscreen app in front (and the setting on): leave the screen to it, unless the
-    // tray icon explicitly asked for Settings
-    if (hideFs && fsApp === "windowed" && !pin) { setTucked(true); return; }
+    // A real fullscreen window or app owns the display: hide completely instead of tucking, unless
+    // the tray icon explicitly asked for Settings.
+    if (fsHide) return;
     const can = edge === "top" || edge === "bottom" ? hideUD : hideLR;
-    if (!can || hover || pin || dragging || stt.active || pick) return;
+    if (!can || hover || pin || dragging || stt.active || tm.done) return;
     const id = setTimeout(() => setTucked(true), 2500);
     return () => clearTimeout(id);
-  }, [edge, hover, pin, dragging, stt.active, nonce, hideUD, hideLR, pick, hideFs, fsApp]);
+  }, [edge, hover, pin, dragging, stt.active, nonce, hideUD, hideLR, fsHide, tm.done]);
 
   // report hit rect so Rust can toggle click-through; driven by the springs themselves, so an idle
   // island costs nothing instead of running a 60 Hz timer
   useEffect(() => {
     if (!TAURI) return;
+    if (fsHide) {
+      // invisible means untouchable: keep the click-through target at zero so a game still gets the mouse
+      invoke("set_hit_rect", { x: 0, y: 0, w: 0, h: 0 });
+      return;
+    }
     let last = "";
     const push = () => {
       const s = lift.get(), cw = w.get() * s, ch = h.get() * s;
@@ -772,11 +828,12 @@ export default function App() {
     const stops = [x, y, w, h, lift].map((v) => v.on("change", push));
     push();
     return () => stops.forEach((off) => off());
-  }, []);
+  }, [fsHide]);
 
   // drag + snap
   const d = useRef<{ gx: number; gy: number; sx: number; sy: number; on: boolean; vx: number; vy: number; lx: number; ly: number; lt: number; lock: boolean; hz: boolean; mid: number } | null>(null);
   const pdown = (cx: number, cy: number) => {
+    if (posLockRef.current) return; // locked in place: buttons still work, dragging does not
     d.current = { gx: cx - x.get(), gy: cy - y.get(), sx: cx, sy: cy, on: false, vx: 0, vy: 0, lx: cx, ly: cy, lt: performance.now(), lock: false, hz: true, mid: 0 };
   };
   const monAt = (cx: number, cy: number) => {
@@ -880,7 +937,7 @@ export default function App() {
       if (!d.current?.on) setHover(p.inside);
       const f = fn.current;
       if (p.down && !active) {
-        if (!p.inside) { if (pickRef.current && pxRef.current) commitPickRef.current(); return; }
+        if (!p.inside) return;
         active = true;
         const el = document.elementFromPoint(p.x, p.y);
         btn = el?.closest("button") as HTMLElement | null;
@@ -937,7 +994,7 @@ export default function App() {
   const box = { x, y, width: w, height: h, scale: lift };
   const vp = { variants: pageV, initial: "initial", animate: "animate", exit: "exit" } as const;
   return (
-    <div className={`stage ${dragging ? "dragging" : ""}`} style={{ ["--accent" as string]: tint ? `color-mix(in srgb, ${tint} 55%, white)` : "#fff" }}>
+    <div className={`stage ${dragging ? "dragging" : ""} ${fsHide ? "fsgone" : ""}`} style={{ ["--accent" as string]: tint ? `color-mix(in srgb, ${tint} 55%, white)` : "#fff" }}>
       <motion.div className="glow" style={{ ...box, borderRadius: rad }} animate={{ opacity: siri ? 0.35 : tint && media ? (mode === "expanded" ? 0.16 : 0.1) : 0 }} transition={{ duration: 0.6 }}>
         <div className={`halo ${siri ? "siri" : ""}`} style={{ background: siri ? undefined : tint }} />
       </motion.div>
@@ -954,9 +1011,14 @@ export default function App() {
             {mode === "media" && media && (
               <motion.div key={"media" + vertical} className={`row ${vertical ? "v" : ""}`} custom={0} {...vp}>
                 {artEl()}
-                {!vertical && <div className="col" />}
+                {!vertical && <div className="col center"><ProgressText m={media} /></div>}
                 {!vertical && timerActive && <span className="tt">{tm.done ? "Done" : fmtT(tm.left)}</span>}
                 <Bars playing={media.playing} />
+              </motion.div>
+            )}
+            {mode === "idle" && (
+              <motion.div key={"idle" + vertical} className={`row idle ${vertical ? "v" : ""}`} custom={0} {...vp}>
+                <ClockText />
               </motion.div>
             )}
             {mode === "timer" && (
@@ -970,6 +1032,13 @@ export default function App() {
                 <motion.button className="mic" aria-label="Stop dictation" onClick={toggleStt} animate={{ scale: [1, 1.08, 1] }} transition={{ repeat: Infinity, duration: 1.6 }}>{Icon.mic}</motion.button>
                 <div className="col"><div className="tx sm">{full ? <div className="tw">{done.map((t, i) => <span key={"d" + i} className="w">{t} </span>)}{live.map((t, i) => <span key={"l" + i + t} className="w hint">{t} </span>)}</div> : <span className="hint">Listening…</span>}</div></div>
                 <Bars playing level={level} />
+              </motion.div>
+            )}
+            {mode === "alarm" && (
+              <motion.div key="alarm" className="row alarm" custom={0} {...vp}>
+                <motion.div className="alarmbell" animate={{ rotate: [0, -14, 12, -8, 6, 0] }} transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}>{Icon.bell}</motion.div>
+                <div className="col"><div className="title">Time's up</div><div className="artist">{fmtT(tm.total)} timer</div></div>
+                <button className="stopbtn" onClick={tmReset}>Stop</button>
               </motion.div>
             )}
             {mode === "expanded" && page === 0 && (
@@ -1036,33 +1105,28 @@ export default function App() {
             )}
             {mode === "expanded" && page === 2 && (
               <motion.div key="ex2" className="row ex" custom={dir} {...vp}>
-                <div className="top">
-                  <div className="col">
-                    <div className="title">Timer</div>
-                    <div className="artist">{tm.done ? "Time's up" : tm.running ? "Running" : tm.left < tm.total ? "Paused" : "Set a countdown"}</div>
-                  </div>
-                  {!tmIdle && <button className="micbtn" aria-label={tm.running ? "Pause timer" : "Start timer"} onClick={tmToggle}>{tm.running ? Icon.pause : Icon.play}</button>}
-                </div>
                 {tmIdle ? (
                   <div className="top">
                     <div className="picker">
-                      <WheelCol v={tmH} max={23} label="h" on={(h) => tmSet(h * 3600 + tmM * 60 + tmS)} />
+                      <WheelCol v={tmH} max={23} label="h" on={(h) => tmSet(h * 3600 + tmM * 60)} />
                       <span className="wsep">:</span>
-                      <WheelCol v={tmM} max={59} label="m" on={(m) => tmSet(tmH * 3600 + m * 60 + tmS)} />
-                      <span className="wsep">:</span>
-                      <WheelCol v={tmS} max={59} label="s" on={(x) => tmSet(tmH * 3600 + tmM * 60 + x)} />
+                      <WheelCol v={tmM} max={59} label="m" on={(m) => tmSet(tmH * 3600 + m * 60)} />
                     </div>
-                    <button className="micbtn" aria-label="Start timer" onClick={tmToggle}>{Icon.play}</button>
+                    <button className="playbtn" aria-label="Start timer" onClick={tmToggle}>{Icon.play}</button>
                   </div>
                 ) : (
-                  <div className="timerbig">
-                    <Ring frac={tm.total ? tm.left / tm.total : 0} size={52} done={tm.done} />
-                    <div className="title big">{tm.done ? "Done" : fmtT(tm.left)}</div>
+                  <div className="top">
+                    <Ring frac={tm.total ? tm.left / tm.total : 0} size={46} done={tm.done} />
+                    <div className="col">
+                      <div className="title big">{tm.done ? "Done" : fmtT(tm.left)}</div>
+                      <div className="artist">{tm.running ? "Running" : tm.done ? "Time's up" : "Paused"}</div>
+                    </div>
+                    <button className="playbtn" aria-label={tm.running ? "Pause timer" : "Start timer"} onClick={tmToggle}>{tm.running ? Icon.pause : Icon.play}</button>
                   </div>
                 )}
                 <div className="cfg">
                   <div className="seg" role="group" aria-label="Presets">
-                    {[5, 15, 25].map((m) => <button key={m} className={tm.total === m * 60 ? "on" : ""} onClick={() => tmStart(m * 60)}>{m}m</button>)}
+                    {[5, 15, 25].map((m) => <button key={m} className={tm.total === m * 60 ? "on" : ""} onClick={() => tmSet(m * 60)}>{m}m</button>)}
                   </div>
                   {!tmIdle && <button className="chip" aria-label="Reset timer" onClick={tmReset}>Reset</button>}
                 </div>
@@ -1070,65 +1134,34 @@ export default function App() {
             )}
             {mode === "expanded" && page === 3 && (
               <motion.div key="ex3" className="row ex" custom={dir} {...vp}>
-                <div className="top">
-                  <div className="col">
-                    <div className="title">Mixer</div>
-                    <div className="artist">Speakers and microphone · Default devices</div>
+                {([["vol", mix.vol, mix.mute, Icon.spk, Icon.spkOff, "Speakers"], ["mic", mix.mic, mix.mic_mute, Icon.mic, Icon.micOff, "Microphone"]] as const).map(([id, v, m, on, off, label]) => (
+                  <div className="mrow" key={id}>
+                    <button className={`mbtn ${m ? "off" : ""}`} aria-label={`Mute ${label}`} onClick={() => muteSet(id === "mic", !m)}>{m || v === 0 ? off : on}</button>
+                    <div className={`seek ${slOn === id ? "on" : ""}`} data-id={id}><div className="track"><b style={{ width: `${(m ? 0 : v) * 100}%` }} /></div></div>
+                    <span className="pct">{Math.round((m ? 0 : v) * 100)}</span>
                   </div>
-                </div>
-                <div className="mixbody">
-                  {([["vol", mix.vol, mix.mute, Icon.spk, Icon.spkOff, "Speakers"], ["mic", mix.mic, mix.mic_mute, Icon.mic, Icon.micOff, "Microphone"]] as const).map(([id, v, m, on, off, label]) => (
-                    <div className="mrow" key={id}>
-                      <button className={`mbtn ${m ? "off" : ""}`} aria-label={`Mute ${label}`} onClick={() => muteSet(id === "mic", !m)}>{m || v === 0 ? off : on}</button>
-                      <div className={`seek ${slOn === id ? "on" : ""}`} data-id={id}><div className="track"><b style={{ width: `${(m ? 0 : v) * 100}%` }} /></div></div>
-                      <span className="pct">{Math.round((m ? 0 : v) * 100)}</span>
-                    </div>
-                  ))}
-                </div>
+                ))}
               </motion.div>
             )}
             {mode === "expanded" && page === 4 && (
               <motion.div key="ex4" className="row ex" custom={dir} {...vp}>
-                <div className="top">
-                  <div className="col">
-                    <div className="title">System</div>
-                    <div className="artist">Live performance</div>
+                {([["CPU", st.cpu], ["RAM", st.ram], ["GPU", st.gpu]] as const).map(([n, v]) => (
+                  <div className="srow" key={n}>
+                    <span className="sl">{n}</span>
+                    <div className="sbar"><b style={{ width: `${Math.max(0, Math.min(100, v))}%`, background: load(v) }} /></div>
+                    <span className="sv">{v < 0 ? "n/a" : `${Math.round(v)}%`}</span>
                   </div>
-                </div>
-                <div className="statbody">
-                  {([["CPU", st.cpu], ["RAM", st.ram], ["GPU", st.gpu]] as const).map(([n, v]) => (
-                    <div className="srow" key={n}>
-                      <span className="sl">{n}</span>
-                      <div className="sbar"><b style={{ width: `${Math.max(0, Math.min(100, v))}%`, background: load(v) }} /></div>
-                      <span className="sv">{v < 0 ? "n/a" : `${Math.round(v)}%`}</span>
-                    </div>
-                  ))}
-                  <div className="srow"><span className="sl">NET</span><span className="net">↓ {fmtB(st.down)}</span><span className="net">↑ {fmtB(st.up)}</span></div>
-                </div>
+                ))}
+                <div className="srow"><span className="sl">NET</span><span className="net">↓ {fmtB(st.down)}</span><span className="net">↑ {fmtB(st.up)}</span></div>
               </motion.div>
             )}
             {mode === "expanded" && page === 5 && (
               <motion.div key="ex5" className="row ex" custom={dir} {...vp}>
-                <div className="tools">
-                  <button className="tool" aria-label="Screenshot" onClick={shot}>{Icon.cam}<span>Screenshot</span></button>
-                  <button className={`tool ${pick ? "on" : ""}`} aria-label="Pick color" onClick={togglePick}>
-                    {pick && px ? <i className="sw" style={{ background: px.hex }} /> : Icon.drop}<span>{pick ? (px ? px.hex : "Click a pixel…") : "Pick color"}</span>
-                  </button>
-                </div>
-                <div className="clh"><span>{note || "Clipboard"}</span><button className="chip" aria-label="Clear clipboard history" onClick={clipClear}>Clear</button></div>
-                <div className="cl">
-                  {clips.slice(0, 4).map((c, i) => <button key={i + c} className="clip" onClick={() => clipCopy(i)}>{c.replace(/\s+/g, " ").slice(0, 70)}</button>)}
-                  {!clips.length && <div className="hint cle">Copy something to see it here</div>}
-                </div>
-              </motion.div>
-            )}
-            {mode === "expanded" && page === 6 && (
-              <motion.div key="ex6" className="row ex" custom={dir} {...vp}>
                 <div className="top">
                   <div className="col">
                     <div className="title">Settings</div>
                     <div className="artist">
-                      {hideFs && fsApp === "windowed" ? "Hidden for a fullscreen app" : !hideUD && !hideLR ? "Always visible" : hideUD && hideLR ? "Hides on every edge" : hideUD ? "Hides when up or down" : "Hides when left or right"}
+                      {hideFs && fsApp !== "none" ? "Hidden for a fullscreen window or app" : !hideUD && !hideLR ? "Always visible" : hideUD && hideLR ? "Hides on every edge" : hideUD ? "Hides when up or down" : "Hides when left or right"}
                       {autoOn ? " · Starts with Windows" : ""}
                     </div>
                   </div>
@@ -1149,10 +1182,17 @@ export default function App() {
                     </div>
                   </div>
                   <div className="cfg">
-                    <span className="hint" title="Hide the island while a fullscreen app or game is in front">Auto-hide in fullscreen</span>
-                    <div className="seg" role="group" aria-label="Auto-hide while a fullscreen app is in front">
+                    <span className="hint" title="Hide the island while a fullscreen window or fullscreen app is in front">Fullscreen window / app</span>
+                    <div className="seg" role="group" aria-label="Hide while a fullscreen window or app is in front">
                       <button className={hideFs ? "" : "on"} onClick={() => setHideFsPref(false)}>Off</button>
                       <button className={hideFs ? "on" : ""} onClick={() => setHideFsPref(true)}>On</button>
+                    </div>
+                  </div>
+                  <div className="cfg">
+                    <span className="hint">Lock position</span>
+                    <div className="seg" role="group" aria-label="Lock the island in place">
+                      <button className={posLock ? "" : "on"} onClick={() => setPosLockPref(false)}>Off</button>
+                      <button className={posLock ? "on" : ""} onClick={() => setPosLockPref(true)}>On</button>
                     </div>
                   </div>
                   <div className="cfg">

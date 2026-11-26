@@ -13,11 +13,20 @@ mod mixer;
 mod paths;
 mod stats;
 mod stt;
-mod tools;
 mod tray;
 
-use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
+use std::{
+    sync::{
+        atomic::{AtomicIsize, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
+
+/// The overlay's HWND, set once at setup; dictation focuses it while recording a shortcut.
+pub static OVERLAY: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Default)]
 struct Hit { r: [f64; 4], dragging: bool, p: (f64, f64, bool, bool), mons: Vec<[f64; 4]> }
@@ -48,13 +57,34 @@ fn cursor_at(ox: f64, oy: f64) -> Option<(f64, f64)> {
 #[cfg(not(windows))]
 fn cursor_at(_: f64, _: f64) -> Option<(f64, f64)> { None }
 
-// Is the foreground window a fullscreen app/game (covers its whole monitor, not the desktop or taskbar)?
+// Is the foreground window a real fullscreen app/game, rather than a normal maximized window?
+#[cfg(windows)]
+fn covers_monitor(r: windows::Win32::Foundation::RECT, m: windows::Win32::Foundation::RECT) -> bool {
+    // within a couple of pixels for DPI rounding
+    let tol = 2;
+    r.left <= m.left + tol && r.top <= m.top + tol && r.right >= m.right - tol && r.bottom >= m.bottom - tol
+}
+
+/// A window is fullscreen when its visible frame covers the whole monitor and it is not a framed
+/// (title-bar) window in the maximized state. The frame check matters on Windows 11 with an
+/// auto-hiding taskbar, where a maximized normal window also reaches the screen edges.
+#[cfg(windows)]
+fn fullscreen_rect(maximized: bool, framed: bool, visible: windows::Win32::Foundation::RECT, monitor: windows::Win32::Foundation::RECT) -> bool {
+    covers_monitor(visible, monitor) && !(maximized && framed)
+}
+
 #[cfg(windows)]
 fn fullscreen_app(own: isize) -> bool {
     use windows::Win32::{
         Foundation::{HWND, RECT},
-        Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST},
-        UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible},
+        Graphics::{
+            Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
+            Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST},
+        },
+        UI::WindowsAndMessaging::{
+            GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
+            IsIconic, IsWindowVisible, GWL_STYLE, SW_SHOWMAXIMIZED, WINDOWPLACEMENT, WS_CAPTION,
+        },
     };
     unsafe {
         let fg: HWND = GetForegroundWindow();
@@ -62,12 +92,19 @@ fn fullscreen_app(own: isize) -> bool {
         let mut cls = [0u16; 64];
         let n = GetClassNameW(fg, &mut cls).max(0) as usize;
         if matches!(String::from_utf16_lossy(&cls[..n]).as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") { return false; }
+        // A maximized normal window is not a fullscreen app. GetWindowRect includes its invisible
+        // resize border (which reaches past the monitor edges), so testing that alone made every
+        // maximized window hide the island; the DWM frame below is the visible rectangle instead.
+        let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        let maximized = GetWindowPlacement(fg, &mut wp).is_ok() && wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
+        let framed = (GetWindowLongW(fg, GWL_STYLE) as u32) & WS_CAPTION.0 != 0;
         let mut r = RECT::default();
-        if GetWindowRect(fg, &mut r).is_err() { return false; }
+        if DwmGetWindowAttribute(fg, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut _ as *mut _, std::mem::size_of::<RECT>() as u32).is_err() {
+            if GetWindowRect(fg, &mut r).is_err() { return false; }
+        }
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         if !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() { return false; }
-        let m = mi.rcMonitor;
-        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+        fullscreen_rect(maximized, framed, r, mi.rcMonitor)
     }
 }
 // Is the system cursor currently visible? (Games hide it during gameplay and show it in menus.)
@@ -147,8 +184,7 @@ fn main() {
             stt::stt_engine, stt::stt_ended, stt::stt_type,
             hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::record_submit, hotkey::cancel_record_shortcut, hotkey::reset_shortcut,
 autostart::autostart_get, autostart::autostart_set,
-            stats::stats, mixer::mixer_get, mixer::mixer_set_vol, mixer::mixer_set_mute,
-            tools::clip_list, tools::clip_copy, tools::clip_clear, tools::set_clipboard, tools::pixel_at_cursor, tools::screenshot
+            stats::stats, mixer::mixer_get, mixer::mixer_set_vol, mixer::mixer_set_mute
         ])
         .setup(move |app| {
             logf!("win", "setup: initialising the dictation shortcut");
@@ -156,9 +192,8 @@ autostart::autostart_get, autostart::autostart_set,
             hotkey::init();
             autostart::init();
             if let Err(e) = tray::init(app.handle()) { logf!("tray", "could not add the tray icon: {e}"); }
-            logf!("win", "setup: starting stats and tools");
+            logf!("win", "setup: starting stats");
             stats::start();
-            tools::init();
 
             // Transparent overlay over the whole primary monitor; the island lives inside it.
             let win = app.get_webview_window("main").unwrap();
@@ -189,7 +224,7 @@ autostart::autostart_get, autostart::autostart_set,
             let hwnd = win.hwnd()?.0 as isize;
             // The overlay never moves after setup, so cache its top-left for cursor math.
             let (ox, oy) = (minx as f64, miny as f64);
-            tools::OVERLAY.store(hwnd, std::sync::atomic::Ordering::Relaxed);
+            OVERLAY.store(hwnd, Ordering::Relaxed);
             let winc = win.clone();
             let app = app.handle().clone();
             logf!("win", "mouse thread starting, hwnd={hwnd} scale={scale}");
@@ -275,4 +310,36 @@ autostart::autostart_get, autostart::autostart_set,
         })
         .run(tauri::generate_context!())
         .expect("error while running IslandWin");
+}
+
+#[cfg(all(test, windows))]
+mod fullscreen_tests {
+    use super::*;
+    use windows::Win32::Foundation::RECT;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT { left, top, right, bottom }
+    }
+
+    #[test]
+    fn monitor_cover_must_be_complete() {
+        let m = rect(0, 0, 1920, 1080);
+        assert!(covers_monitor(rect(0, 0, 1920, 1080), m));
+        assert!(covers_monitor(rect(-1, -1, 1921, 1081), m));
+        assert!(!covers_monitor(rect(0, 0, 1920, 1040), m));
+        assert!(!covers_monitor(rect(0, 0, 1280, 720), m));
+    }
+
+    #[test]
+    fn maximized_framed_window_is_not_fullscreen() {
+        let m = rect(0, 0, 1920, 1080);
+        // Windows 11 with an auto-hiding taskbar: a maximized normal window reaches every edge but
+        // still has its title bar, so it must not hide the island.
+        assert!(!fullscreen_rect(true, true, m, m));
+        // borderless fullscreen game
+        assert!(fullscreen_rect(true, false, m, m));
+        assert!(fullscreen_rect(false, false, m, m));
+        // ordinary window above the taskbar
+        assert!(!fullscreen_rect(false, true, rect(0, 0, 1920, 1040), m));
+    }
 }

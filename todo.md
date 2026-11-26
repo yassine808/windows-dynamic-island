@@ -13,7 +13,7 @@
 - [x] Public GitHub repo and the `v0.1.0` release
 - [x] Install the app
 
-## This round
+## Round 2 (done)
 
 - [x] Rename the app data folder to `Windows Dynamic Island` and migrate the old settings + log
 - [x] Settings: rename "Fullscreen" so it clearly means auto-hide when a fullscreen app is open
@@ -28,8 +28,48 @@
 - [x] Update README and screenshots
 - [x] Run typecheck, frontend build, Apple-design check, Rust check + tests, then commit and push
 
+## Round 3 (done)
+
+- [x] Restore the previous non-uniform page heights; do not make every page the same height
+- [x] Timer: hours and minutes only; presets stay editable and fill the picker instead of starting a
+      fixed duration
+- [x] Timer at zero: better alarm sound, ring continuously, expand the island like listening mode
+      (`340x84`), iOS look, stop only with the alarm's Stop button
+- [x] Timer play button is white, not gray
+- [x] Collapsed pill: media progress time in the middle; with no media, the normal 12-hour clock
+- [x] Hand cursor only over clickable controls, not the whole island
+- [x] Settings switch that locks the island position
+- [x] Delete the Tools page entirely (Screenshot, Pick color, Clipboard)
+- [x] Add a short delay between page changes while scrolling
+- [x] Keep the product name `IslandWin`; dictation stays on Edge / WebView2
+- [x] Auto-hide fullscreen hides the app only when a real Windows fullscreen window or application is
+      running
+- [x] Rename that setting away from "screen" to "full screen window / full screen application"
+- [x] Fix the clipped / chopped island when interacting with a fullscreen app: fade it out completely
+      instead of tucking part of the expanded card off the edge
+- [x] Log file never grows past roughly 2 MB; rotate one previous file
+- [x] Check and test everything, update README and screenshots, build the installer, commit and push
+
 ## Requests, as written
 
+- [x] Restore the previous non-uniform page heights. Do not make every page the same height.
+- [x] Timer: hours and minutes only. Presets must stay editable and fill the picker instead of
+      starting a fixed duration.
+- [x] Timer at zero: better alarm sound, ring continuously, expand the island like listening mode
+      (`340x84`), iOS look, stop only via the alarm's Stop button.
+- [x] Timer play button must be white, not gray.
+- [x] Collapsed pill: media progress time in the middle; when no media, show the normal 12-hour clock.
+- [x] Hand cursor only over clickable controls, not the whole island.
+- [x] Settings switch that locks the island position.
+- [x] Delete the Tools page entirely (Screenshot, Pick color, Clipboard).
+- [x] Add a short delay between page changes while scrolling.
+- [x] Keep the product name `IslandWin`; STT stays on Edge/WebView2.
+- [x] Auto-hide fullscreen must hide the app only when a Windows fullscreen window/application is
+      running.
+- [x] Rename that setting away from "screen" to "full screen window / full screen application".
+- [x] Log file must never exceed roughly 2 MB.
+- [x] When I'm in a Windows fullscreen app and I interact with it, the island looks chopped. Fix bug.
+- [x] Build, commit and push when done.
 - [x] Rename the AppData folder to `Windows Dynamic Island`.
 - [x] Settings currently says "Fullscreen"; rename it so it clearly means auto-hide when a fullscreen app is open.
 - [x] Record any keyboard key and any mouse button, with no restrictions (bare keys allowed); never use left click.
@@ -48,6 +88,7 @@
 
 - Settings live in `%APPDATA%\Windows Dynamic Island\settings.json`; the old
   `%APPDATA%\dev.yassine808.islandwin` folder is copied over on first launch.
-- Logs live in `%APPDATA%\Windows Dynamic Island\logs\islandwin.log`.
+- Logs live in `%APPDATA%\Windows Dynamic Island\logs\islandwin.log`. The file rotates at ~2 MB to
+  `islandwin.old.log`, keeping one previous file.
 - UI preferences stay in the webview's local storage.
 - Autostart is `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\IslandWin`.

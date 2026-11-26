@@ -374,7 +374,7 @@ mod imp {
     }
 
     pub fn grab_focus(app: &tauri::AppHandle) -> (isize, isize, isize) {
-        let hwnd = crate::tools::OVERLAY.load(Ordering::Relaxed);
+        let hwnd = crate::OVERLAY.load(Ordering::Relaxed);
         if hwnd == 0 { return (0, 0, 0); }
         // the overlay is normally WS_EX_NOACTIVATE; make it activatable for the recording only,
         // so keystrokes land in our own window instead of the app underneath
