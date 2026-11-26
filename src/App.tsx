@@ -1001,10 +1001,13 @@ export default function App() {
       if (!l.length) return;
       const next = l.map(([x, y, w, h]) => ({ x, y, w, h }));
       const prev = monRef.current;
+      const prevPrimary = mons.current[0];
       mons.current = next;
-      // keep the island on the monitor it was on if that monitor survived, otherwise the primary
+      // A Parsec / remote display can become the new primary: follow it, otherwise keep the island
+      // on the monitor it was on if that monitor survived, and fall back to the primary.
+      const primaryMoved = next[0].x !== prevPrimary.x || next[0].y !== prevPrimary.y;
       const near = (q: Rect) => Math.hypot(q.x + q.w / 2 - (prev.x + prev.w / 2), q.y + q.h / 2 - (prev.y + prev.h / 2));
-      const keep = next.find((q) => q.x === prev.x && q.y === prev.y) ?? next.reduce((a, q) => (near(q) < near(a) ? q : a));
+      const keep = primaryMoved ? next[0] : next.find((q) => q.x === prev.x && q.y === prev.y) ?? next.reduce((a, q) => (near(q) < near(a) ? q : a));
       monRef.current = keep;
       const horiz = edgeRef.current === "top" || edgeRef.current === "bottom";
       if (initial) {

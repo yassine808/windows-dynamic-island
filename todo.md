@@ -106,7 +106,7 @@
 - [x] Cursor: hand only over clickable controls!!
 - [x] Also fix bug where the STT doesnt work as it should ,see logs
 - [x] and fix issue where i have the button on hold, and i release it, yet the window keeps listening
-- [ ] also remove CI SonarCloud Code Analysis (needs one manual uninstall, see Notes)
+- [ ] also remove CI SonarCloud Code Analysis (skipped for now: GitHub App, see Notes)
 
 ## Requests, as written (round 5)
 
