@@ -4,7 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 
 type Media = { title: string; artist: string; playing: boolean; position: number; duration: number; at: number } | null;
 type Stt = { active: boolean; partial: string; text: string; err: string };
-type Mode = "idle" | "media" | "listening" | "expanded";
+type Mode = "idle" | "media" | "listening" | "expanded" | "timer";
+type Tm = { total: number; left: number; end: number; running: boolean; done: boolean };
+const PAGES = 3; // 0 media, 1 dictation, 2 timer
+const PAGE_H = [190, 138, 150];
 type Edge = "top" | "bottom" | "left" | "right";
 type Rect = { x: number; y: number; w: number; h: number };
 type P = { x: number; y: number; down: boolean; inside: boolean };
@@ -20,8 +23,9 @@ const settle = { type: "spring", stiffness: 300, damping: 38, mass: 1 } as const
 function sizeOf(m: Mode, v: boolean, peek: boolean, page = 0) {
   if (m === "idle") return peek ? (v ? { w: 44, h: 150, r: 22 } : { w: 150, h: 44, r: 22 }) : v ? { w: 37, h: 126, r: 18.5 } : { w: 126, h: 37, r: 18.5 };
   if (m === "media") return v ? { w: 37, h: 170, r: 18.5 } : { w: 250, h: 37, r: 18.5 };
+  if (m === "timer") return v ? { w: 37, h: 126, r: 18.5 } : { w: 150, h: 37, r: 18.5 };
   if (m === "listening") return { w: 340, h: 84, r: 42 };
-  return { w: 370, h: page === 1 ? 138 : 190, r: 44 };
+  return { w: 370, h: PAGE_H[page] ?? 190, r: 44 };
 }
 
 function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boolean, m: Rect) {
@@ -133,6 +137,29 @@ function useMic(active: boolean, level: MotionValue<number>) {
   }, [active]);
 }
 
+const fmtT = (s: number) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(x).padStart(2, "0")}`; };
+const beep = () => {
+  try {
+    const c = new AudioContext();
+    [0, 0.25, 0.5].forEach((t) => {
+      const o = c.createOscillator(), g = c.createGain(), at = c.currentTime + t;
+      o.frequency.value = 880;
+      g.gain.setValueAtTime(0.15, at); g.gain.exponentialRampToValueAtTime(0.001, at + 0.18);
+      o.connect(g).connect(c.destination); o.start(at); o.stop(at + 0.2);
+    });
+    setTimeout(() => c.close(), 1200);
+  } catch {}
+};
+const Ring = ({ frac, size, done }: { frac: number; size: number; done?: boolean }) => {
+  const sw = size > 30 ? 4 : 3, rr = (size - sw) / 2, c = 2 * Math.PI * rr;
+  return (
+    <svg className="ring" width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      <circle cx={size / 2} cy={size / 2} r={rr} fill="none" stroke="rgba(255,255,255,0.22)" strokeWidth={sw} />
+      <circle cx={size / 2} cy={size / 2} r={rr} fill="none" stroke={done ? "#30d158" : "var(--orange, #ff9f0a)"} strokeWidth={sw} strokeLinecap="round" strokeDasharray={c} strokeDashoffset={c * (1 - Math.max(0, Math.min(1, frac)))} transform={`rotate(-90 ${size / 2} ${size / 2})`} />
+    </svg>
+  );
+};
+
 // iOS "waveform" glyph: five rounded bars, tallest in the middle
 const PROFILE = [0.42, 0.72, 1, 0.72, 0.42];
 const GAIN = [0.9, 1.5, 2, 1.5, 0.9];
@@ -217,6 +244,31 @@ export default function App() {
   const [rec, setRec] = useState(false);
   const [recErr, setRecErr] = useState("");
   const recCancel = useRef<(() => void) | null>(null);
+  const [tm, setTm] = useState<Tm>({ total: 25 * 60, left: 25 * 60, end: 0, running: false, done: false });
+  const timerActive = tm.running || tm.done;
+  const leftNow = (t: Tm) => Math.max(0, Math.ceil((t.end - Date.now()) / 1000));
+  const tmStart = (sec: number) => setTm({ total: sec, left: sec, end: Date.now() + sec * 1000, running: true, done: false });
+  const tmToggle = () => setTm((t) => {
+    if (t.running) return { ...t, running: false, left: leftNow(t) || t.total };
+    const left = t.done || t.left <= 0 ? t.total : t.left;
+    return { ...t, left, end: Date.now() + left * 1000, running: true, done: false };
+  });
+  const tmReset = () => setTm((t) => ({ ...t, left: t.total, running: false, done: false }));
+  useEffect(() => {
+    if (!tm.running) return;
+    const id = setInterval(() => setTm((t) => {
+      if (!t.running) return t;
+      const left = leftNow(t);
+      if (left <= 0) { beep(); return { ...t, left: 0, running: false, done: true }; }
+      return left === t.left ? t : { ...t, left };
+    }), 250);
+    return () => clearInterval(id);
+  }, [tm.running]);
+  useEffect(() => {
+    if (!tm.done) return;
+    const id = setTimeout(() => setTm((t) => ({ ...t, left: t.total, done: false })), 8000);
+    return () => clearTimeout(id);
+  }, [tm.done]);
   const mediaRef = useRef(media);
   mediaRef.current = media;
   const flyKey = useRef("");
@@ -244,8 +296,8 @@ export default function App() {
   useMic(stt.active, level);
 
   const vertical = edge === "left" || edge === "right";
-  const expanded = hover && !dragging && (!!media || page === 1);
-  const mode: Mode = stt.active ? "listening" : expanded ? "expanded" : media ? "media" : "idle";
+  const expanded = hover && !dragging && (!!media || page > 0);
+  const mode: Mode = stt.active ? "listening" : expanded ? "expanded" : media ? "media" : timerActive ? "timer" : "idle";
   const full = (stt.text + " " + stt.partial).trim();
   const done = stt.text.split(/\s+/).filter(Boolean), live = stt.partial.split(/\s+/).filter(Boolean);
   // a toggle can be triggered twice by one physical click; ignore the echo
@@ -298,7 +350,7 @@ export default function App() {
     const d = s.acc > 0 ? 1 : -1;
     s.acc = 0; s.t = now;
     setDir(d);
-    setPage((p) => Math.max(0, Math.min(1, p + d)));
+    setPage((p) => Math.max(0, Math.min(PAGES - 1, p + d)));
   };
 
   // spring everything to its target
@@ -508,7 +560,14 @@ export default function App() {
               <motion.div key={"media" + vertical} className={`row ${vertical ? "v" : ""}`} custom={0} {...vp}>
                 {artEl()}
                 {!vertical && <div className="col" />}
+                {!vertical && timerActive && <span className="tt">{tm.done ? "Done" : fmtT(tm.left)}</span>}
                 <Bars playing={media.playing} />
+              </motion.div>
+            )}
+            {mode === "timer" && (
+              <motion.div key={"timer" + vertical} className={`row ${vertical ? "v" : ""}`} custom={0} {...vp}>
+                <Ring frac={tm.total ? tm.left / tm.total : 0} size={22} done={tm.done} />
+                {!vertical && <span className="tt">{tm.done ? "Done" : fmtT(tm.left)}</span>}
               </motion.div>
             )}
             {mode === "listening" && (
@@ -562,9 +621,27 @@ export default function App() {
                 </div>
               </motion.div>
             )}
+            {mode === "expanded" && page === 2 && (
+              <motion.div key="ex2" className="row ex" custom={dir} {...vp}>
+                <div className="top">
+                  <Ring frac={tm.total ? tm.left / tm.total : 0} size={46} done={tm.done} />
+                  <div className="col">
+                    <div className="title big">{tm.done ? "Done" : fmtT(tm.left)}</div>
+                    <div className="artist">{tm.running ? "Running" : tm.done ? "Time's up" : tm.left < tm.total ? "Paused" : "Timer"}</div>
+                  </div>
+                  <button className="micbtn" aria-label={tm.running ? "Pause timer" : "Start timer"} onClick={tmToggle}>{tm.running ? Icon.pause : Icon.play}</button>
+                </div>
+                <div className="cfg">
+                  <div className="seg" role="group" aria-label="Presets">
+                    {[5, 15, 25].map((m) => <button key={m} className={tm.total === m * 60 ? "on" : ""} onClick={() => tmStart(m * 60)}>{m}m</button>)}
+                  </div>
+                  <button className="chip" aria-label="Reset timer" onClick={tmReset}>Reset</button>
+                </div>
+              </motion.div>
+            )}
           </AnimatePresence>
           <motion.div className="dots" initial={false} animate={{ opacity: mode === "expanded" ? 1 : 0 }}>
-            <i className={page === 0 ? "on" : ""} /><i className={page === 1 ? "on" : ""} />
+            {Array.from({ length: PAGES }, (_, i) => <i key={i} className={page === i ? "on" : ""} />)}
           </motion.div>
         </motion.div>
       </motion.div>
