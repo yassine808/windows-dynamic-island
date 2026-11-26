@@ -1,0 +1,4 @@
+timestamp,label,build,seconds,cpu_pct_core,cpu_ms_total,ram_mb,processes,hottest
+2026-11-26T02:43:53,baseline-1 user active,dev,30,61.0,18300,495,7,msedgewebview2:5688ms
+2026-11-26T02:44:23,baseline-2 user active,dev,25,72.8,18200,495,7,msedgewebview2:8453ms
+"2026-11-26T03:03:22","idle after pointer-event and STT change","dev","30","2.2","672","461","7","msedgewebview2:281ms"

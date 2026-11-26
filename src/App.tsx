@@ -168,6 +168,7 @@ function useStt() {
         setStt((s) => (s.active || s.partial ? { ...s, active: false, partial: "" } : s));
         call("stt_ended"); // keep the Rust state machine in sync when the engine stops by itself
       },
+      debug: (m) => dbg(`stt: ${m}`),
     });
     let gone = false;
     const offs: Array<() => void> = [];

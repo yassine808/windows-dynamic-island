@@ -8,6 +8,7 @@ export type SpeechHandlers = {
   final: (t: string) => void; // one finished phrase
   error: (msg: string) => void; // engine gave up: caller should fall back
   end: () => void; // recognizer is done for good
+  debug?: (msg: string) => void; // lifecycle breadcrumbs for the app log
 };
 
 export const speechAvailable = () =>
@@ -38,7 +39,9 @@ export function createSpeech(h: SpeechHandlers) {
   let startedAt = 0;
   let flapping = 0; // sessions that die within 400 ms of starting
 
-  rec.onstart = () => { startedAt = performance.now(); };
+  rec.onstart = () => { startedAt = performance.now(); h.debug?.("engine started"); };
+  rec.onaudiostart = () => h.debug?.("audio capture open");
+  rec.onsoundstart = () => h.debug?.("sound detected");
 
   rec.onresult = (e: Rec) => {
     let interim = "";
