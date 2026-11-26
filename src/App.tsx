@@ -6,8 +6,14 @@ type Media = { title: string; artist: string; playing: boolean; position: number
 type Stt = { active: boolean; partial: string; text: string; err: string };
 type Mode = "idle" | "media" | "listening" | "expanded" | "timer";
 type Tm = { total: number; left: number; end: number; running: boolean; done: boolean };
-const PAGES = 3; // 0 media, 1 dictation, 2 timer
-const PAGE_H = [190, 138, 150];
+type Mix = { vol: number; mute: boolean; mic: number; mic_mute: boolean; ok: boolean };
+type St = { cpu: number; ram: number; gpu: number; down: number; up: number };
+type Px = { hex: string; r: number; g: number; b: number };
+const PAGES = 6; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 tools
+const PAGE_H = [190, 138, 150, 140, 150, 230];
+const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+const fmtB = (b: number) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB/s` : `${Math.round(b / 1024)} KB/s`);
+const load = (v: number) => (v >= 85 ? "#ff453a" : v >= 60 ? "#ff9f0a" : "#fff");
 type Edge = "top" | "bottom" | "left" | "right";
 type Rect = { x: number; y: number; w: number; h: number };
 type P = { x: number; y: number; down: boolean; inside: boolean };
@@ -209,6 +215,11 @@ const Icon = {
   next: <Skip flip />,
   play: <svg width="19" height="22" viewBox="0 0 30 35" fill="currentColor"><path d="M5.5 5.2V29.8L25.8 17.5z" stroke="currentColor" strokeWidth="4.4" strokeLinejoin="round" /></svg>,
   pause: <svg width="17" height="22" viewBox="0 0 30 35" fill="currentColor"><rect x="0" y="0" width="10.8" height="35" rx="3.2" /><rect x="19.2" y="0" width="10.8" height="35" rx="3.2" /></svg>,
+  spk: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z" /></svg>,
+  spkOff: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z" /><path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" /></svg>,
+  micOff: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z" /><path d="M4 4l16 16" stroke="#000" strokeWidth="4.5" strokeLinecap="round" /><path d="M4 4l16 16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>,
+  cam: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M9 4l-1.8 2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3.2L15 4H9zm3 4.5A4.5 4.5 0 1 1 7.5 13 4.5 4.5 0 0 1 12 8.5zm0 2A2.5 2.5 0 1 0 14.5 13 2.5 2.5 0 0 0 12 10.5z" /></svg>,
+  drop: <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2.5S5 10 5 14.5a7 7 0 0 0 14 0C19 10 12 2.5 12 2.5z" /></svg>,
   mic: <svg viewBox="0 0 24 24" width="20" height="20" fill="#fff"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z" /></svg>,
 };
 
@@ -269,6 +280,48 @@ export default function App() {
     const id = setTimeout(() => setTm((t) => ({ ...t, left: t.total, done: false })), 8000);
     return () => clearTimeout(id);
   }, [tm.done]);
+
+  // ---- mixer / stats / tools state ----
+  const [mix, setMix] = useState<Mix>({ vol: 0.5, mute: false, mic: 0.8, mic_mute: false, ok: true });
+  const [slOn, setSlOn] = useState<string | null>(null);
+  const [st, setSt] = useState<St>({ cpu: 0, ram: 0, gpu: -1, down: 0, up: 0 });
+  const [clips, setClips] = useState<string[]>(TAURI ? [] : ["Hello world", "https://example.com/some/long/link"]);
+  const [pick, setPick] = useState(false);
+  const [px, setPx] = useState<Px | null>(null);
+  const [note, setNote] = useState("");
+  const mixFreeze = useRef(0);
+  const sendT = useRef<Record<string, number>>({});
+  const pickRef = useRef(false), pxRef = useRef<Px | null>(null), noteT = useRef(0);
+  pickRef.current = pick; pxRef.current = px;
+  const flash = (t: string) => { setNote(t); clearTimeout(noteT.current); noteT.current = window.setTimeout(() => setNote(""), 3000); };
+  const slider = (id: "vol" | "mic", f: number, commit: boolean) => {
+    f = clamp01(f);
+    const now = performance.now();
+    mixFreeze.current = now + 800;
+    setMix((m) => ({ ...m, [id]: f, ...(f > 0 ? { [id === "vol" ? "mute" : "mic_mute"]: false } : {}) }));
+    setSlOn(commit ? null : id);
+    if (commit || now - (sendT.current[id] ?? 0) > 40) { sendT.current[id] = now; call("mixer_set_vol", { mic: id === "mic", v: f }); }
+  };
+  const muteSet = (mic: boolean, on: boolean) => {
+    mixFreeze.current = performance.now() + 800;
+    setMix((m) => ({ ...m, [mic ? "mic_mute" : "mute"]: on }));
+    call("mixer_set_mute", { mic, on });
+  };
+  const shot = async () => {
+    if (!TAURI) return flash("Needs the desktop app");
+    flash("Capturing…");
+    try { await invoke<string>("screenshot"); flash("Saved to Pictures/IslandWin"); } catch (e) { flash(String(e)); }
+  };
+  const clipCopy = (i: number) => { call("clip_copy", { i }); flash("Copied"); };
+  const clipClear = () => { setClips([]); call("clip_clear"); };
+  const togglePick = () => { setPx(null); setPick((v) => !v); };
+  const commitPick = () => {
+    const c = pxRef.current;
+    pickRef.current = false; setPick(false);
+    if (c) { call("set_clipboard", { text: c.hex }); flash(`Copied ${c.hex}`); }
+  };
+  const commitPickRef = useRef(commitPick);
+  commitPickRef.current = commitPick;
   const mediaRef = useRef(media);
   mediaRef.current = media;
   const flyKey = useRef("");
@@ -296,7 +349,7 @@ export default function App() {
   useMic(stt.active, level);
 
   const vertical = edge === "left" || edge === "right";
-  const expanded = hover && !dragging && (!!media || page > 0);
+  const expanded = (hover || pick) && !dragging && (!!media || page > 0);
   const mode: Mode = stt.active ? "listening" : expanded ? "expanded" : media ? "media" : timerActive ? "timer" : "idle";
   const full = (stt.text + " " + stt.partial).trim();
   const done = stt.text.split(/\s+/).filter(Boolean), live = stt.partial.split(/\s+/).filter(Boolean);
@@ -328,6 +381,50 @@ export default function App() {
     } catch (e) { if (String(e) !== "cancelled") setRecErr(String(e)); }
     setRec(false);
   };
+
+  // live data only while the matching page is open
+  const open = mode === "expanded";
+  useEffect(() => {
+    if (!open || page !== 3) return;
+    let on = true;
+    const f = async () => {
+      if (!TAURI || performance.now() < mixFreeze.current) return;
+      try { const m = await invoke<Mix>("mixer_get"); if (on && m.ok) setMix(m); } catch {}
+    };
+    f();
+    const id = setInterval(f, 500);
+    return () => { on = false; clearInterval(id); };
+  }, [open, page]);
+  useEffect(() => {
+    if (!open || page !== 4) return;
+    let on = true;
+    const f = async () => {
+      if (!TAURI) return setSt({ cpu: 20 + Math.random() * 40, ram: 55, gpu: 35 + Math.random() * 30, down: 1.2e6 * Math.random(), up: 2e5 * Math.random() });
+      try { const v = await invoke<St>("stats"); if (on) setSt(v); } catch {}
+    };
+    f();
+    const id = setInterval(f, 1000);
+    return () => { on = false; clearInterval(id); };
+  }, [open, page]);
+  useEffect(() => {
+    if (!open || page !== 5 || !TAURI) return;
+    let on = true;
+    const f = async () => { try { const l = await invoke<string[]>("clip_list"); if (on) setClips(l); } catch {} };
+    f();
+    const id = setInterval(f, 600);
+    return () => { on = false; clearInterval(id); };
+  }, [open, page]);
+  useEffect(() => {
+    if (!pick || !TAURI) return;
+    let on = true, busy = false;
+    const id = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try { const c = await invoke<Px | null>("pixel_at_cursor"); if (on && c) setPx(c); } catch {}
+      busy = false;
+    }, 50);
+    return () => { on = false; clearInterval(id); };
+  }, [pick]);
 
   // Tauri: Rust already turns every click into a synthetic one (see get_ptr loop). Drop the webview's own real click,
   // otherwise toggle buttons (mic, record shortcut) fire twice and flip straight back.
@@ -448,7 +545,8 @@ export default function App() {
   fn.current = { pdown, pmove, pup };
 
   // seek bar: click or drag
-  const seekTo = (f: number, commit: boolean) => {
+  const seekTo = (f: number, commit: boolean, id?: string) => {
+    if (id === "vol" || id === "mic") return slider(id, f, commit);
     const m = mediaRef.current;
     if (!m || m.duration <= 0) return;
     f = Math.min(1, Math.max(0, f));
@@ -463,46 +561,46 @@ export default function App() {
   seekFn.current = seekTo;
 
   // browser fallback (no Tauri): normal DOM pointer events
-  const skb = useRef<DOMRect | null>(null);
+  const skb = useRef<DOMRect | null>(null), skid = useRef<string | undefined>(undefined);
   const down = (e: React.PointerEvent) => {
     const t = e.target as HTMLElement;
     if (TAURI || t.closest("button")) return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     const sk = t.closest(".seek:not(.off)");
-    if (sk) { skb.current = sk.getBoundingClientRect(); seekTo((e.clientX - skb.current.left) / skb.current.width, false); return; }
+    if (sk) { skb.current = sk.getBoundingClientRect(); skid.current = (sk as HTMLElement).dataset.id; seekTo((e.clientX - skb.current.left) / skb.current.width, false, skid.current); return; }
     pdown(e.clientX, e.clientY);
   };
   const mv = (e: React.PointerEvent) => {
     if (TAURI) return;
-    if (skb.current) seekTo((e.clientX - skb.current.left) / skb.current.width, false); else pmove(e.clientX, e.clientY);
+    if (skb.current) seekTo((e.clientX - skb.current.left) / skb.current.width, false, skid.current); else pmove(e.clientX, e.clientY);
   };
   const up = (e: React.PointerEvent) => {
     if (TAURI) return;
-    if (skb.current) { seekTo((e.clientX - skb.current.left) / skb.current.width, true); skb.current = null; } else pup();
+    if (skb.current) { seekTo((e.clientX - skb.current.left) / skb.current.width, true, skid.current); skb.current = null; } else pup();
   };
 
   // Tauri: Rust reads the mouse (window stays click-through elsewhere); we poll it
   useEffect(() => {
     if (!TAURI) return;
-    let active = false, btn: HTMLElement | null = null, sk: DOMRect | null = null;
+    let active = false, btn: HTMLElement | null = null, sk: DOMRect | null = null, skId: string | undefined;
     const frac = (p: P) => (sk ? (p.x - sk.left) / sk.width : 0);
     const onPtr = (p: P) => {
       if (!d.current?.on) setHover(p.inside);
       const f = fn.current;
       if (p.down && !active) {
-        if (!p.inside) return;
+        if (!p.inside) { if (pickRef.current && pxRef.current) commitPickRef.current(); return; }
         active = true;
         const el = document.elementFromPoint(p.x, p.y);
         btn = el?.closest("button") as HTMLElement | null;
         const seek = !btn ? (el?.closest(".seek:not(.off)") as HTMLElement | null) : null;
-        if (seek) { sk = seek.getBoundingClientRect(); seekFn.current(frac(p), false); }
+        if (seek) { sk = seek.getBoundingClientRect(); skId = seek.dataset.id; seekFn.current(frac(p), false, skId); }
         else if (btn) btn.classList.add("pressed"); else f.pdown(p.x, p.y);
       } else if (p.down && active) {
-        if (sk) seekFn.current(frac(p), false);
+        if (sk) seekFn.current(frac(p), false, skId);
         else if (!btn) f.pmove(p.x, p.y);
       } else if (!p.down && active) {
         active = false;
-        if (sk) { seekFn.current(frac(p), true); sk = null; }
+        if (sk) { seekFn.current(frac(p), true, skId); sk = null; skId = undefined; }
         else if (btn) {
           btn.classList.remove("pressed");
           if (document.elementFromPoint(p.x, p.y)?.closest("button") === btn) btn.click();
@@ -639,9 +737,47 @@ export default function App() {
                 </div>
               </motion.div>
             )}
+            {mode === "expanded" && page === 3 && (
+              <motion.div key="ex3" className="row ex" custom={dir} {...vp}>
+                {([["vol", mix.vol, mix.mute, Icon.spk, Icon.spkOff, "Speakers"], ["mic", mix.mic, mix.mic_mute, Icon.mic, Icon.micOff, "Microphone"]] as const).map(([id, v, m, on, off, label]) => (
+                  <div className="mrow" key={id}>
+                    <button className={`mbtn ${m ? "off" : ""}`} aria-label={`Mute ${label}`} onClick={() => muteSet(id === "mic", !m)}>{m || v === 0 ? off : on}</button>
+                    <div className={`seek ${slOn === id ? "on" : ""}`} data-id={id}><div className="track"><b style={{ width: `${(m ? 0 : v) * 100}%` }} /></div></div>
+                    <span className="pct">{Math.round((m ? 0 : v) * 100)}</span>
+                  </div>
+                ))}
+              </motion.div>
+            )}
+            {mode === "expanded" && page === 4 && (
+              <motion.div key="ex4" className="row ex" custom={dir} {...vp}>
+                {([["CPU", st.cpu], ["RAM", st.ram], ["GPU", st.gpu]] as const).map(([n, v]) => (
+                  <div className="srow" key={n}>
+                    <span className="sl">{n}</span>
+                    <div className="sbar"><b style={{ width: `${Math.max(0, Math.min(100, v))}%`, background: load(v) }} /></div>
+                    <span className="sv">{v < 0 ? "n/a" : `${Math.round(v)}%`}</span>
+                  </div>
+                ))}
+                <div className="srow"><span className="sl">NET</span><span className="net">↓ {fmtB(st.down)}</span><span className="net">↑ {fmtB(st.up)}</span></div>
+              </motion.div>
+            )}
+            {mode === "expanded" && page === 5 && (
+              <motion.div key="ex5" className="row ex" custom={dir} {...vp}>
+                <div className="tools">
+                  <button className="tool" aria-label="Screenshot" onClick={shot}>{Icon.cam}<span>Screenshot</span></button>
+                  <button className={`tool ${pick ? "on" : ""}`} aria-label="Pick color" onClick={togglePick}>
+                    {pick && px ? <i className="sw" style={{ background: px.hex }} /> : Icon.drop}<span>{pick ? (px ? px.hex : "Click a pixel…") : "Pick color"}</span>
+                  </button>
+                </div>
+                <div className="clh"><span>{note || "Clipboard"}</span><button className="chip" aria-label="Clear clipboard history" onClick={clipClear}>Clear</button></div>
+                <div className="cl">
+                  {clips.slice(0, 4).map((c, i) => <button key={i + c} className="clip" onClick={() => clipCopy(i)}>{c.replace(/\s+/g, " ").slice(0, 70)}</button>)}
+                  {!clips.length && <div className="hint cle">Copy something to see it here</div>}
+                </div>
+              </motion.div>
+            )}
           </AnimatePresence>
-          <motion.div className="dots" initial={false} animate={{ opacity: mode === "expanded" ? 1 : 0 }}>
-            {Array.from({ length: PAGES }, (_, i) => <i key={i} className={page === i ? "on" : ""} />)}
+          <motion.div className="dots" initial={false} animate={{ opacity: mode === "expanded" ? 1 : 0 }} style={{ pointerEvents: mode === "expanded" ? "auto" : "none" }}>
+            {Array.from({ length: PAGES }, (_, i) => <button key={i} aria-label={`Page ${i + 1}`} className={page === i ? "on" : ""} onClick={() => { setDir(i > page ? 1 : -1); setPage(i); }} />)}
           </motion.div>
         </motion.div>
       </motion.div>

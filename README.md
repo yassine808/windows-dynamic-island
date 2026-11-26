@@ -19,5 +19,12 @@ Dynamic Island for Windows. Media controls + speech-to-text.
 - Cursor stays the normal arrow while hovering; it only becomes a grabbing hand during an actual drag.
 - Set `SCRUBBER = false` in `src/App.tsx` to hide the elapsed/remaining bar (bare art + title + controls layout).
 
+## Pages
+Scroll over the island (or click the dots) to switch: Media, Dictation, Timer, Mixer, Stats, Tools.
+- Mixer: speaker and mic volume sliders with mute buttons (default devices).
+- Stats: CPU, RAM, network, and GPU (NVIDIA only, needs `nvidia-smi`; shows n/a otherwise).
+- Tools: Screenshot saves all monitors to Pictures/IslandWin (the island is left out). Pick color: move over any pixel, click to copy its hex; that click also reaches the app underneath. Clipboard keeps your last copied text (password-manager copies are skipped), click an entry to copy it again, Clear wipes it. History is in memory only.
+- Fullscreen games: DirectX/exclusive fullscreen can make screenshots black.
+
 ## Next
 - Whisper STT: stream mic PCM to whisper.cpp, emit `stt-partial` events.

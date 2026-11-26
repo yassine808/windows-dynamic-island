@@ -8,7 +8,10 @@ macro_rules! logf {
 mod hotkey;
 mod logger;
 mod media;
+mod mixer;
+mod stats;
 mod stt;
+mod tools;
 
 use std::{sync::{Arc, Mutex}, thread, time::Duration};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, State};
@@ -119,11 +122,16 @@ fn main() {
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
             media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_dragging, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
-            hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::cancel_record_shortcut
+            hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::cancel_record_shortcut,
+            stats::stats, mixer::mixer_get, mixer::mixer_set_vol, mixer::mixer_set_mute,
+            tools::clip_list, tools::clip_copy, tools::clip_clear, tools::set_clipboard, tools::pixel_at_cursor, tools::screenshot
         ])
         .setup(move |app| {
             logf!("win", "setup: initialising the dictation shortcut");
             hotkey::init(app.handle());
+            logf!("win", "setup: starting stats and tools");
+            stats::start();
+            tools::init();
 
             // Transparent overlay over the whole primary monitor; the island lives inside it.
             let win = app.get_webview_window("main").unwrap();
@@ -151,6 +159,7 @@ fn main() {
 
             // Window stays fully click-through. Rust reads the mouse and forwards it to the UI.
             let hwnd = win.hwnd()?.0 as isize;
+            tools::OVERLAY.store(hwnd, std::sync::atomic::Ordering::Relaxed);
             let winc = win.clone();
             logf!("win", "mouse thread starting, hwnd={hwnd} scale={scale}");
             thread::spawn(move || {
