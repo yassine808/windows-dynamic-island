@@ -20,7 +20,9 @@ Dynamic Island for Windows. Media controls + speech-to-text.
 - Set `SCRUBBER = false` in `src/App.tsx` to hide the elapsed/remaining bar (bare art + title + controls layout).
 
 ## Pages
-Scroll over the island (or click the dots) to switch: Media, Dictation, Timer, Mixer, Stats, Tools.
+Scroll over the island (or click the dots) to switch: Media, Dictation, Timer, Mixer, Stats, Tools, Auto-hide.
+- Timer: scroll over the hours / minutes / seconds wheels (or click the dim numbers) to set any time, then press play. 5/15/25m presets start right away.
+- Auto-hide: Never, Sides (default: left, right, bottom tuck away when idle), or All edges (the top tucks too). Hover the edge to bring it back. Saved automatically.
 - Mixer: speaker and mic volume sliders with mute buttons (default devices).
 - Stats: CPU, RAM, network, and GPU (NVIDIA only, needs `nvidia-smi`; shows n/a otherwise).
 - Tools: Screenshot saves all monitors to Pictures/IslandWin (the island is left out). Pick color: move over any pixel, click to copy its hex; that click also reaches the app underneath. Clipboard keeps your last copied text (password-manager copies are skipped), click an entry to copy it again, Clear wipes it. History is in memory only.

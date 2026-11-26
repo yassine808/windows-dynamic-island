@@ -9,8 +9,33 @@ type Tm = { total: number; left: number; end: number; running: boolean; done: bo
 type Mix = { vol: number; mute: boolean; mic: number; mic_mute: boolean; ok: boolean };
 type St = { cpu: number; ram: number; gpu: number; down: number; up: number };
 type Px = { hex: string; r: number; g: number; b: number };
-const PAGES = 6; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 tools
-const PAGE_H = [190, 138, 150, 140, 150, 230];
+type Hide = "off" | "sides" | "all";
+const PAGES = 7; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 tools, 6 auto-hide
+const PAGE_H = [190, 138, 160, 140, 150, 230, 138];
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+// one wheel of the timer picker: scroll over it (or click the dim numbers) to change the value; wraps around
+function WheelCol({ v, max, label, on }: { v: number; max: number; label: string; on: (n: number) => void }) {
+  const acc = useRef(0);
+  const step = (d: number) => on((v + d + max + 1) % (max + 1));
+  return (
+    <div
+      className="wcol"
+      onWheel={(e) => {
+        e.stopPropagation(); // don't switch pages while scrolling the picker
+        acc.current += e.deltaY;
+        if (Math.abs(acc.current) < 40) return;
+        const d = acc.current > 0 ? 1 : -1;
+        acc.current = 0;
+        step(d);
+      }}
+    >
+      <button className="wv dim" aria-label={`${label} down`} onClick={() => step(-1)}>{pad2((v + max) % (max + 1))}</button>
+      <div className="wv cur">{pad2(v)}<small>{label}</small></div>
+      <button className="wv dim" aria-label={`${label} up`} onClick={() => step(1)}>{pad2((v + 1) % (max + 1))}</button>
+    </div>
+  );
+}
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 const fmtB = (b: number) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB/s` : `${Math.round(b / 1024)} KB/s`);
 const load = (v: number) => (v >= 85 ? "#ff453a" : v >= 60 ? "#ff9f0a" : "#fff");
@@ -262,8 +287,12 @@ export default function App() {
   const tmToggle = () => setTm((t) => {
     if (t.running) return { ...t, running: false, left: leftNow(t) || t.total };
     const left = t.done || t.left <= 0 ? t.total : t.left;
+    if (left <= 0) return t;
     return { ...t, left, end: Date.now() + left * 1000, running: true, done: false };
   });
+  const tmSet = (total: number) => setTm((t) => ({ ...t, total, left: total, running: false, done: false }));
+  const tmIdle = !tm.running && !tm.done && tm.left === tm.total;
+  const tmH = Math.floor(tm.total / 3600), tmM = Math.floor((tm.total % 3600) / 60), tmS = tm.total % 60;
   const tmReset = () => setTm((t) => ({ ...t, left: t.total, running: false, done: false }));
   useEffect(() => {
     if (!tm.running) return;
@@ -280,6 +309,9 @@ export default function App() {
     const id = setTimeout(() => setTm((t) => ({ ...t, left: t.total, done: false })), 8000);
     return () => clearTimeout(id);
   }, [tm.done]);
+
+  const [hide, setHide] = useState<Hide>(() => { try { const v = localStorage.getItem("hide"); return v === "off" || v === "all" ? v : "sides"; } catch { return "sides"; } });
+  const setHidePref = (v: Hide) => { setHide(v); try { localStorage.setItem("hide", v); } catch {} };
 
   // ---- mixer / stats / tools state ----
   const [mix, setMix] = useState<Mix>({ vol: 0.5, mute: false, mic: 0.8, mic_mute: false, ok: true });
@@ -466,10 +498,11 @@ export default function App() {
   // tuck into the edge when idle (not on top)
   useEffect(() => {
     setTucked(false);
-    if (edge === "top" || hover || dragging || stt.active) return;
+    const can = hide === "all" || (hide === "sides" && edge !== "top");
+    if (!can || hover || dragging || stt.active || pick) return;
     const id = setTimeout(() => setTucked(true), 2500);
     return () => clearTimeout(id);
-  }, [edge, hover, dragging, stt.active, nonce]);
+  }, [edge, hover, dragging, stt.active, nonce, hide, pick]);
 
   // report hit rect so Rust can toggle click-through
   useEffect(() => {
@@ -721,19 +754,32 @@ export default function App() {
             )}
             {mode === "expanded" && page === 2 && (
               <motion.div key="ex2" className="row ex" custom={dir} {...vp}>
-                <div className="top">
-                  <Ring frac={tm.total ? tm.left / tm.total : 0} size={46} done={tm.done} />
-                  <div className="col">
-                    <div className="title big">{tm.done ? "Done" : fmtT(tm.left)}</div>
-                    <div className="artist">{tm.running ? "Running" : tm.done ? "Time's up" : tm.left < tm.total ? "Paused" : "Timer"}</div>
+                {tmIdle ? (
+                  <div className="top">
+                    <div className="picker">
+                      <WheelCol v={tmH} max={23} label="h" on={(h) => tmSet(h * 3600 + tmM * 60 + tmS)} />
+                      <span className="wsep">:</span>
+                      <WheelCol v={tmM} max={59} label="m" on={(m) => tmSet(tmH * 3600 + m * 60 + tmS)} />
+                      <span className="wsep">:</span>
+                      <WheelCol v={tmS} max={59} label="s" on={(x) => tmSet(tmH * 3600 + tmM * 60 + x)} />
+                    </div>
+                    <button className="micbtn" aria-label="Start timer" onClick={tmToggle}>{Icon.play}</button>
                   </div>
-                  <button className="micbtn" aria-label={tm.running ? "Pause timer" : "Start timer"} onClick={tmToggle}>{tm.running ? Icon.pause : Icon.play}</button>
-                </div>
+                ) : (
+                  <div className="top">
+                    <Ring frac={tm.total ? tm.left / tm.total : 0} size={46} done={tm.done} />
+                    <div className="col">
+                      <div className="title big">{tm.done ? "Done" : fmtT(tm.left)}</div>
+                      <div className="artist">{tm.running ? "Running" : tm.done ? "Time's up" : "Paused"}</div>
+                    </div>
+                    <button className="micbtn" aria-label={tm.running ? "Pause timer" : "Start timer"} onClick={tmToggle}>{tm.running ? Icon.pause : Icon.play}</button>
+                  </div>
+                )}
                 <div className="cfg">
                   <div className="seg" role="group" aria-label="Presets">
                     {[5, 15, 25].map((m) => <button key={m} className={tm.total === m * 60 ? "on" : ""} onClick={() => tmStart(m * 60)}>{m}m</button>)}
                   </div>
-                  <button className="chip" aria-label="Reset timer" onClick={tmReset}>Reset</button>
+                  {!tmIdle && <button className="chip" aria-label="Reset timer" onClick={tmReset}>Reset</button>}
                 </div>
               </motion.div>
             )}
@@ -772,6 +818,23 @@ export default function App() {
                 <div className="cl">
                   {clips.slice(0, 4).map((c, i) => <button key={i + c} className="clip" onClick={() => clipCopy(i)}>{c.replace(/\s+/g, " ").slice(0, 70)}</button>)}
                   {!clips.length && <div className="hint cle">Copy something to see it here</div>}
+                </div>
+              </motion.div>
+            )}
+            {mode === "expanded" && page === 6 && (
+              <motion.div key="ex6" className="row ex" custom={dir} {...vp}>
+                <div className="top">
+                  <div className="col">
+                    <div className="title">Auto-hide</div>
+                    <div className="artist">{hide === "off" ? "Always visible" : hide === "sides" ? "Hides on left, right and bottom" : "Hides on every edge, even the top"}</div>
+                  </div>
+                </div>
+                <div className="cfg">
+                  <div className="seg" role="group" aria-label="Auto-hide">
+                    <button className={hide === "off" ? "on" : ""} onClick={() => setHidePref("off")}>Never</button>
+                    <button className={hide === "sides" ? "on" : ""} onClick={() => setHidePref("sides")}>Sides</button>
+                    <button className={hide === "all" ? "on" : ""} onClick={() => setHidePref("all")}>All edges</button>
+                  </div>
                 </div>
               </motion.div>
             )}

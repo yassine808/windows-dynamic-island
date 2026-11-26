@@ -13,7 +13,7 @@ mod stats;
 mod stt;
 mod tools;
 
-use std::{sync::{Arc, Mutex}, thread, time::Duration};
+use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, State};
 use tauri_plugin_global_shortcut::ShortcutState;
 
@@ -28,19 +28,19 @@ fn lbutton() -> bool {
 #[cfg(not(windows))]
 fn lbutton() -> bool { false }
 
-// Cursor position relative to the window's top-left, in physical px. Pure Win32: never waits on the UI thread.
+// Cursor position relative to the overlay's top-left, in physical px. The window never moves, so the
+// origin is cached once instead of asking the window manager on every tick.
 #[cfg(windows)]
-fn cursor_rel(h: isize) -> Option<(f64, f64)> {
-    use windows::Win32::{Foundation::{HWND, POINT, RECT}, UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect}};
+fn cursor_at(ox: f64, oy: f64) -> Option<(f64, f64)> {
+    use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
     unsafe {
-        let (mut p, mut r) = (POINT::default(), RECT::default());
+        let mut p = POINT::default();
         GetCursorPos(&mut p).ok()?;
-        GetWindowRect(HWND(h as *mut _), &mut r).ok()?;
-        Some(((p.x - r.left) as f64, (p.y - r.top) as f64))
+        Some((p.x as f64 - ox, p.y as f64 - oy))
     }
 }
 #[cfg(not(windows))]
-fn cursor_rel(_: isize) -> Option<(f64, f64)> { None }
+fn cursor_at(_: f64, _: f64) -> Option<(f64, f64)> { None }
 
 // Is the foreground window a fullscreen app/game (covers its whole monitor, not the desktop or taskbar)?
 #[cfg(windows)]
@@ -79,6 +79,22 @@ fn cursor_visible() -> bool { true }
 #[cfg(not(windows))]
 fn fullscreen_app(_: isize) -> bool { false }
 
+// A second copy would double every sampler and add a second full-desktop overlay: refuse to start.
+#[cfg(windows)]
+fn already_running() -> bool {
+    use windows::core::w;
+    use windows::Win32::{
+        Foundation::{GetLastError, ERROR_ALREADY_EXISTS},
+        System::Threading::CreateMutexW,
+    };
+    unsafe {
+        if CreateMutexW(None, true, w!("Local\\islandwin-single-instance")).is_err() { return false; }
+        GetLastError() == ERROR_ALREADY_EXISTS
+    }
+}
+#[cfg(not(windows))]
+fn already_running() -> bool { false }
+
 #[tauri::command]
 fn set_hit_rect(st: State<Shared>, x: f64, y: f64, w: f64, h: f64) { st.lock().unwrap().r = [x, y, w, h]; }
 
@@ -99,6 +115,10 @@ fn set_dragging(st: State<Shared>, on: bool) { st.lock().unwrap().dragging = on;
 
 fn main() {
     logger::init();
+    if already_running() {
+        logf!("boot", "another islandwin instance is already running, exiting");
+        return;
+    }
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::force_capture();
         logf!("panic", "{info}\n{bt}");
