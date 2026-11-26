@@ -248,13 +248,17 @@ export default function App() {
   const mode: Mode = stt.active ? "listening" : expanded ? "expanded" : media ? "media" : "idle";
   const full = (stt.text + " " + stt.partial).trim();
   const done = stt.text.split(/\s+/).filter(Boolean), live = stt.partial.split(/\s+/).filter(Boolean);
-  const toggleStt = () => (TAURI ? call("stt_toggle") : setStt((s) => ({ ...s, active: !s.active, text: s.active ? s.text : "", partial: s.active ? "" : "Dictation preview, words appear as you speak" })));
+  // a toggle can be triggered twice by one physical click; ignore the echo
+  const gate = useRef(0);
+  const once = () => { const n = performance.now(); if (n - gate.current < 350) return false; gate.current = n; return true; };
+  const toggleStt = () => !once() ? undefined : (TAURI ? call("stt_toggle") : setStt((s) => ({ ...s, active: !s.active, text: s.active ? s.text : "", partial: s.active ? "" : "Dictation preview, words appear as you speak" })));
 
   useEffect(() => { if (stt.active) { setDir(0); setPage(1); } }, [stt.active]);
   useEffect(() => { if (TAURI) invoke<{ shortcut: string; hold: boolean }>("stt_settings").then(setCfg).catch(() => {}); }, []);
   const pretty = (k: string) => k.split("+").map((p) => p.replace(/^Key|^Digit/, "").replace(/^Arrow/, "")).join(" + ");
   const setHold = (hold: boolean) => { setCfg((c) => ({ ...c, hold })); call("set_stt_hold", { hold }); };
   const record = async () => {
+    if (!once()) return;
     if (rec) { if (TAURI) call("cancel_record_shortcut"); else recCancel.current?.(); return; }
     setRec(true); setRecErr("");
     try {
@@ -272,6 +276,15 @@ export default function App() {
     } catch (e) { if (String(e) !== "cancelled") setRecErr(String(e)); }
     setRec(false);
   };
+
+  // Tauri: Rust already turns every click into a synthetic one (see get_ptr loop). Drop the webview's own real click,
+  // otherwise toggle buttons (mic, record shortcut) fire twice and flip straight back.
+  useEffect(() => {
+    if (!TAURI) return;
+    const h = (e: MouseEvent) => { if (e.isTrusted) { e.stopImmediatePropagation(); e.preventDefault(); } };
+    addEventListener("click", h, true);
+    return () => removeEventListener("click", h, true);
+  }, []);
 
   // mouse wheel switches pages
   const wheel = useRef({ acc: 0, t: 0, last: 0 });

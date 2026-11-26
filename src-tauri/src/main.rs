@@ -33,6 +33,40 @@ fn cursor_rel(h: isize) -> Option<(f64, f64)> {
 #[cfg(not(windows))]
 fn cursor_rel(_: isize) -> Option<(f64, f64)> { None }
 
+// Is the foreground window a fullscreen app/game (covers its whole monitor, not the desktop or taskbar)?
+#[cfg(windows)]
+fn fullscreen_app(own: isize) -> bool {
+    use windows::Win32::{
+        Foundation::{HWND, RECT},
+        Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST},
+        UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible},
+    };
+    unsafe {
+        let fg: HWND = GetForegroundWindow();
+        if fg.0.is_null() || fg.0 as isize == own || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() { return false; }
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(fg, &mut cls).max(0) as usize;
+        if matches!(String::from_utf16_lossy(&cls[..n]).as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") { return false; }
+        let mut r = RECT::default();
+        if GetWindowRect(fg, &mut r).is_err() { return false; }
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() { return false; }
+        let m = mi.rcMonitor;
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+#[cfg(not(windows))]
+fn fullscreen_app(_: isize) -> bool { false }
+
+// Show/hide the overlay without ever activating it (activating would pull focus out of the game).
+#[cfg(windows)]
+fn show_overlay(h: isize, on: bool) {
+    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE}};
+    unsafe { let _ = ShowWindow(HWND(h as *mut _), if on { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
+}
+#[cfg(not(windows))]
+fn show_overlay(_: isize, _: bool) {}
+
 #[tauri::command]
 fn set_hit_rect(st: State<Shared>, x: f64, y: f64, w: f64, h: f64) { st.lock().unwrap().r = [x, y, w, h]; }
 
@@ -98,9 +132,26 @@ fn main() {
             thread::spawn(move || {
                 let mut n = 0u32;
                 let mut interactive = false;
+                let mut hidden = false;
                 loop {
                     thread::sleep(Duration::from_millis(8));
                     n += 1;
+                    // a fullscreen game/video in front: get out of the way completely (no hover, no clicks, not drawn)
+                    if n % 25 == 0 {
+                        let fs = fullscreen_app(hwnd);
+                        if fs != hidden {
+                            hidden = fs;
+                            if fs {
+                                interactive = false;
+                                let _ = winc.set_ignore_cursor_events(true);
+                                { let mut g = shared.lock().unwrap(); g.dragging = false; g.p = (-1e6, -1e6, false, false); }
+                                show_overlay(hwnd, false);
+                            } else {
+                                show_overlay(hwnd, true);
+                            }
+                        }
+                    }
+                    if hidden { continue; }
                     let Some((px, py)) = cursor_rel(hwnd) else {
                         if n % 120 == 0 { println!("[rust] cursor read failed"); }
                         continue;

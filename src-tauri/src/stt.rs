@@ -74,6 +74,8 @@ mod imp {
     }
 
     pub fn run(rx: Receiver<()>) -> Result<(), String> {
+        // this worker thread needs its own WinRT apartment before touching SpeechRecognizer
+        unsafe { let _ = windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED); }
         let hint = |x: windows::core::Error| format!("{} (Settings > Privacy > Speech > Online speech recognition must be on)", x);
         let rec = SpeechRecognizer::new().map_err(hint)?;
         let comp = rec.CompileConstraintsAsync().map_err(hint)?.get().map_err(hint)?;
