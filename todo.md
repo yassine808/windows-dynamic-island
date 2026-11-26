@@ -123,6 +123,14 @@
       instead of activating them on every poll
 - [x] Typecheck, frontend build, design checks, Rust check + tests, installer, install, commit, push
 
+## Round 7 (done)
+
+- [x] Fullscreen hide now applies only to a true fullscreen-exclusive D3D app, detected through
+      `SHQueryUserNotificationState`. A windowed / borderless fullscreen app, including a game that
+      hides the cursor while playing, keeps the island visible over it (input is still paused while
+      the app captures the mouse) instead of hiding it completely, so it can always be reached
+- [x] Typecheck, frontend build, design checks, Rust check + tests, installer, install, commit, push
+
 ## Requests, as written (round 5)
 
 - [x] fix the issue, when i change resolution or connect to parsec, it doesnt show where it needs to be
@@ -140,6 +148,10 @@
 - [x] When you finish. I want you to optimize the app as much as you can. The very little lights on
       the PC so it doesn't consume much of resources. But never change how the app behaves. And never
       change the fontend
+
+## Requests, as written (round 7)
+
+- [x] it doesnt at all show when i have an app opened as windowed fullscreen, fix bug
 
 ## Notes
 

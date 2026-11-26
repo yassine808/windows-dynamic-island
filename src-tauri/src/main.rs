@@ -122,6 +122,17 @@ fn cursor_visible() -> bool { true }
 #[cfg(not(windows))]
 fn fullscreen_app(_: isize) -> bool { false }
 
+/// True only when Windows reports a fullscreen-exclusive D3D app in front. A windowed / borderless
+/// fullscreen window (even a game that hides the cursor while playing) reports `QUNS_BUSY` instead,
+/// so the island can stay visible over it.
+#[cfg(windows)]
+fn exclusive_fullscreen() -> bool {
+    use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
+    unsafe { SHQueryUserNotificationState().map(|s| s == QUNS_RUNNING_D3D_FULL_SCREEN).unwrap_or(false) }
+}
+#[cfg(not(windows))]
+fn exclusive_fullscreen() -> bool { false }
+
 // A second copy would double every sampler and add a second full-desktop overlay: refuse to start.
 #[cfg(windows)]
 fn already_running() -> bool {
@@ -266,7 +277,7 @@ autostart::autostart_get, autostart::autostart_set,
                 let mut hidden = false;
                 let mut fs = false;
                 let mut next_fs = Instant::now();
-                let mut fs_seen: Option<(bool, bool)> = None;
+                let mut fs_seen: Option<(bool, bool, bool)> = None;
                 let mut next_fs_emit = Instant::now();
                 let mut sent: Option<Ptr> = None;
                 let mut ticks = 0u32;
@@ -307,15 +318,19 @@ autostart::autostart_get, autostart::autostart_set,
                     let sup = fs && !cur;
                     // a windowed/borderless fullscreen app (the cursor is still there) can ask the island to hide
                     let wfs = fs && cur;
-                    let changed = fs_seen != Some((fs, wfs));
+                    // Only a real fullscreen-exclusive D3D app owns the display. A borderless window,
+                    // or a game in windowed fullscreen that hides the cursor, does not: the island
+                    // stays visible over it and only its input is paused while the mouse is captured.
+                    let ex = fs && exclusive_fullscreen();
+                    let changed = fs_seen != Some((fs, wfs, ex));
                     if changed {
-                        logf!("ptr", "foreground: {}", if !fs { "no fullscreen app" } else if wfs { "windowed fullscreen app" } else { "exclusive fullscreen app" });
+                        logf!("ptr", "foreground: {}", if !fs { "no fullscreen app" } else if ex { "exclusive fullscreen app" } else { "windowed fullscreen app" });
                     }
                     // re-send every couple of seconds so a reloaded webview recovers the state
                     if changed || now >= next_fs_emit {
-                        fs_seen = Some((fs, wfs));
+                        fs_seen = Some((fs, wfs, ex));
                         next_fs_emit = now + Duration::from_secs(2);
-                        let _ = app.emit("fs", serde_json::json!({ "full": fs, "windowed": wfs }));
+                        let _ = app.emit("fs", serde_json::json!({ "full": fs, "windowed": wfs, "exclusive": ex }));
                     }
                     if sup != hidden {
                         hidden = sup;

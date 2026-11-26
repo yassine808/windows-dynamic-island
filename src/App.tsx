@@ -483,8 +483,8 @@ export default function App() {
     (k === "ud" ? setHideUD : setHideLR)(v);
     try { localStorage.setItem(k === "ud" ? "hideUD" : "hideLR", v ? "on" : "off"); } catch {}
   };
-  // step aside while a windowed (borderless) fullscreen app owns the screen; the game-style exclusive
-  // fullscreen case is already handled in Rust, this is the one that leaves the cursor on the desktop
+  // step aside only for a true fullscreen-exclusive app; a windowed (borderless) fullscreen app keeps
+  // the island visible and usable over it
   const [hideFs, setHideFs] = useState<boolean>(() => {
     try { return localStorage.getItem("hideFS") === "on"; } catch { return false; }
   });
@@ -523,7 +523,7 @@ export default function App() {
     if (!TAURI) return;
     let gone = false;
     let un: (() => void) | undefined;
-    listen<{ full: boolean; windowed: boolean }>("fs", (e) => setFsApp(e.payload.windowed ? "windowed" : e.payload.full ? "full" : "none"))
+    listen<{ full: boolean; windowed: boolean; exclusive: boolean }>("fs", (e) => setFsApp(e.payload.exclusive ? "full" : e.payload.full ? "windowed" : "none"))
       .then((f) => { if (gone) f(); else un = f; })
       .catch(() => {});
     return () => { gone = true; un?.(); };
@@ -601,9 +601,12 @@ export default function App() {
   useMic(stt.active, level);
 
   const vertical = edge === "left" || edge === "right";
-  // A fullscreen window or app takes the whole screen; the island gets out of the way completely.
+  // Only a true fullscreen-exclusive D3D app owns the display and hides the island completely. A
+  // windowed / borderless fullscreen app (a game that hides the cursor while playing included) keeps
+  // the island visible over it; otherwise it could never be reached at all. Its input is still paused
+  // in Rust while the app captures the mouse.
   // An alarm always stays visible: it has to be reachable to press Stop, even over a fullscreen app.
-  const fsHide = hideFs && fsApp !== "none" && !pin && !tm.done;
+  const fsHide = hideFs && fsApp === "full" && !pin && !tm.done;
   useEffect(() => {
     if (!TAURI) return;
     const why = fsHide ? "island hidden" : pin && fsApp !== "none" ? "settings pinned" : tm.done && fsApp !== "none" ? "alarm visible" : "island visible";
@@ -822,8 +825,8 @@ export default function App() {
   // tuck into the edge when idle (if that edge's axis is enabled)
   useEffect(() => {
     setTucked(false);
-    // A real fullscreen window or app owns the display: hide completely instead of tucking, unless
-    // the tray icon explicitly asked for Settings.
+    // A fullscreen-exclusive app owns the display: hide completely instead of tucking, unless the
+    // tray icon explicitly asked for Settings.
     if (fsHide) return;
     const can = edge === "top" || edge === "bottom" ? hideUD : hideLR;
     if (!can || hover || pin || dragging || stt.active || tm.done) return;
@@ -1237,7 +1240,7 @@ export default function App() {
                     </div>
                   </div>
                   <div className="cfg">
-                    <span className="hint" title="Hide the island while a fullscreen window or fullscreen app is in front">Fullscreen window / app</span>
+                    <span className="hint" title="Hide the island while a fullscreen-exclusive app owns the display; a windowed / borderless fullscreen app leaves it visible">Fullscreen window / app</span>
                     <div className="seg" role="group" aria-label="Hide while a fullscreen window or app is in front">
                       <button className={hideFs ? "" : "on"} onClick={() => setHideFsPref(false)}>Off</button>
                       <button className={hideFs ? "on" : ""} onClick={() => setHideFsPref(true)}>On</button>
