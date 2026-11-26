@@ -58,15 +58,6 @@ fn fullscreen_app(own: isize) -> bool {
 #[cfg(not(windows))]
 fn fullscreen_app(_: isize) -> bool { false }
 
-// Show/hide the overlay without ever activating it (activating would pull focus out of the game).
-#[cfg(windows)]
-fn show_overlay(h: isize, on: bool) {
-    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE}};
-    unsafe { let _ = ShowWindow(HWND(h as *mut _), if on { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
-}
-#[cfg(not(windows))]
-fn show_overlay(_: isize, _: bool) {}
-
 #[tauri::command]
 fn set_hit_rect(st: State<Shared>, x: f64, y: f64, w: f64, h: f64) { st.lock().unwrap().r = [x, y, w, h]; }
 
@@ -136,18 +127,18 @@ fn main() {
                 loop {
                     thread::sleep(Duration::from_millis(8));
                     n += 1;
-                    // a fullscreen game/video in front: get out of the way completely (no hover, no clicks, not drawn)
+                    // a fullscreen game/video in front: island stays visible but never takes the mouse
                     if n % 25 == 0 {
                         let fs = fullscreen_app(hwnd);
                         if fs != hidden {
                             hidden = fs;
                             if fs {
+                                // stays visible, but fully click-through: no hover, no clicks, mouse goes to the game
                                 interactive = false;
                                 let _ = winc.set_ignore_cursor_events(true);
-                                { let mut g = shared.lock().unwrap(); g.dragging = false; g.p = (-1e6, -1e6, false, false); }
-                                show_overlay(hwnd, false);
-                            } else {
-                                show_overlay(hwnd, true);
+                                let mut g = shared.lock().unwrap();
+                                g.dragging = false;
+                                g.p = (-1e6, -1e6, false, false);
                             }
                         }
                     }

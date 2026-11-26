@@ -547,7 +547,7 @@ export default function App() {
                   <button className={`micbtn ${stt.active ? "on" : ""}`} onClick={toggleStt}>{Icon.mic}</button>
                   <div className="col">
                     <div className="title">Dictation</div>
-                    <div className="artist">{stt.err || recErr || (rec ? "Press keys…" : cfg.hold ? "Hold to talk" : "Tap to talk")}</div>
+                    <div className={`artist ${stt.err || recErr ? "err" : ""}`}>{stt.err || recErr || (rec ? "Press keys…" : cfg.hold ? "Hold to talk" : "Tap to talk")}</div>
                   </div>
                   <Bars playing={stt.active} level={stt.active ? level : undefined} />
                 </div>

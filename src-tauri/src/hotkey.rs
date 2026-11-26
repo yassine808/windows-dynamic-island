@@ -64,8 +64,11 @@ pub fn cancel_record_shortcut() { CANCEL.store(true, Ordering::Relaxed); }
 pub async fn record_shortcut(app: AppHandle) -> Result<String, String> {
     let old = get();
     CANCEL.store(false, Ordering::Relaxed);
-    let _ = app.global_shortcut().unregister_all(); // so pressing the current combo doesn't start dictation meanwhile
+    // so pressing the current combo doesn't start dictation meanwhile
+    if let Ok(sc) = old.shortcut.parse::<Shortcut>() { let _ = app.global_shortcut().unregister(sc); }
+    println!("[hotkey] recording a new shortcut");
     let got = tauri::async_runtime::spawn_blocking(|| imp::record(&CANCEL)).await.map_err(|e| e.to_string());
+    println!("[hotkey] record result: {got:?}");
     let res = match got {
         Ok(Ok(k)) => register(&app, &k).map(|_| k),
         Ok(Err(e)) | Err(e) => Err(e),

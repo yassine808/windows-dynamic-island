@@ -76,7 +76,17 @@ mod imp {
     pub fn run(rx: Receiver<()>) -> Result<(), String> {
         // this worker thread needs its own WinRT apartment before touching SpeechRecognizer
         unsafe { let _ = windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED); }
-        let hint = |x: windows::core::Error| format!("{} (Settings > Privacy > Speech > Online speech recognition must be on)", x);
+        let hint = |x: windows::core::Error| {
+            println!("[stt] failed: {x:?}");
+            // 0x80045509: speech privacy policy not accepted -> open the right Settings page for the user
+            if x.code().0 as u32 == 0x8004_5509 {
+                let _ = std::process::Command::new("cmd").args(["/C", "start", "", "ms-settings:privacy-speech"]).spawn();
+                "Turn on Online speech recognition (Settings opened)".to_string()
+            } else {
+                format!("{x}")
+            }
+        };
+        println!("[stt] starting recognizer");
         let rec = SpeechRecognizer::new().map_err(hint)?;
         let comp = rec.CompileConstraintsAsync().map_err(hint)?.get().map_err(hint)?;
         if comp.Status().map_err(hint)? != SpeechRecognitionResultStatus::Success {
@@ -109,6 +119,7 @@ mod imp {
             Ok(())
         })).map_err(hint)?;
         sess.StartAsync().map_err(hint)?.get().map_err(hint)?;
+        println!("[stt] listening");
         let _ = rx.recv();
         let _ = sess.StopAsync().and_then(|a| a.get());
         Ok(())
