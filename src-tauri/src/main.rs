@@ -55,6 +55,18 @@ fn fullscreen_app(own: isize) -> bool {
         r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
     }
 }
+// Is the system cursor currently visible? (Games hide it during gameplay and show it in menus.)
+#[cfg(windows)]
+fn cursor_visible() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO, CURSOR_SHOWING};
+    unsafe {
+        let mut ci = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+        GetCursorInfo(&mut ci).is_ok() && (ci.flags.0 & CURSOR_SHOWING.0) != 0
+    }
+}
+#[cfg(not(windows))]
+fn cursor_visible() -> bool { true }
+
 #[cfg(not(windows))]
 fn fullscreen_app(_: isize) -> bool { false }
 
@@ -124,22 +136,22 @@ fn main() {
                 let mut n = 0u32;
                 let mut interactive = false;
                 let mut hidden = false;
+                let mut fs = false;
                 loop {
                     thread::sleep(Duration::from_millis(8));
                     n += 1;
-                    // a fullscreen game/video in front: island stays visible but never takes the mouse
-                    if n % 25 == 0 {
-                        let fs = fullscreen_app(hwnd);
-                        if fs != hidden {
-                            hidden = fs;
-                            if fs {
-                                // stays visible, but fully click-through: no hover, no clicks, mouse goes to the game
-                                interactive = false;
-                                let _ = winc.set_ignore_cursor_events(true);
-                                let mut g = shared.lock().unwrap();
-                                g.dragging = false;
-                                g.p = (-1e6, -1e6, false, false);
-                            }
+                    // fullscreen game in front AND its cursor is hidden (mouse-look gameplay): island stays visible
+                    // but never takes the mouse. If the cursor is showing (menus), the island stays usable.
+                    if n % 25 == 0 { fs = fullscreen_app(hwnd); }
+                    let sup = fs && !cursor_visible();
+                    if sup != hidden {
+                        hidden = sup;
+                        if sup {
+                            interactive = false;
+                            let _ = winc.set_ignore_cursor_events(true);
+                            let mut g = shared.lock().unwrap();
+                            g.dragging = false;
+                            g.p = (-1e6, -1e6, false, false);
                         }
                     }
                     if hidden { continue; }
