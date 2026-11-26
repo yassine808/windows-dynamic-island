@@ -85,12 +85,13 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 .controls svg { display: block; }
 
 /* dictation */
-.mic { width: 36px; height: 36px; border-radius: 50%; background: var(--red); display: grid; place-items: center; flex: none; }
+.mic { width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; background: var(--red); display: grid; place-items: center; flex: none; }
+.mic.pressed { opacity: 0.7; }
 .micbtn { width: 46px; height: 46px; border-radius: 50%; border: 0; background: var(--fill); display: grid; place-items: center; flex: none; transition: background 0.25s, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .micbtn.on { background: var(--red); }
 .micbtn.pressed, .micbtn:active { transform: scale(0.88); }
 /* shortcut row */
-.cfg { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+.cfg { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .chip { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 12px; border: 0; border-radius: 14px; background: var(--fill); color: #fff; font: 600 12.5px var(--font); white-space: nowrap; transition: background 0.2s, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--label-secondary); transition: background 0.2s; }
 .chip.rec { background: rgba(255, 69, 58, 0.28); }
@@ -104,7 +105,7 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 .tw { display: block; }
 .w { display: inline; animation: wordin 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 @keyframes wordin { from { opacity: 0; filter: blur(4px); } to { opacity: 1; filter: blur(0); } }
-.tx.sm { margin: 0; font-size: 15px; max-height: 40px; line-height: 1.25; -webkit-mask-image: none; mask-image: none; }
+.tx.sm { margin: 0; font-size: 15px; max-height: 40px; line-height: 1.25; justify-content: flex-end; text-align: center; color: var(--label-secondary); -webkit-mask-image: none; mask-image: none; }
 
 .dots { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 5px; pointer-events: none; }
 .dots i { width: 5px; height: 5px; border-radius: 50%; background: rgba(255, 255, 255, 0.3); transition: background 0.25s; }

@@ -21,7 +21,7 @@ function sizeOf(m: Mode, v: boolean, peek: boolean, page = 0) {
   if (m === "idle") return peek ? (v ? { w: 44, h: 150, r: 22 } : { w: 150, h: 44, r: 22 }) : v ? { w: 37, h: 126, r: 18.5 } : { w: 126, h: 37, r: 18.5 };
   if (m === "media") return v ? { w: 37, h: 170, r: 18.5 } : { w: 250, h: 37, r: 18.5 };
   if (m === "listening") return { w: 340, h: 84, r: 42 };
-  return { w: 370, h: page === 1 ? 224 : 190, r: 44 };
+  return { w: 370, h: page === 1 ? 138 : 190, r: 44 };
 }
 
 function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boolean, m: Rect) {
@@ -245,7 +245,7 @@ export default function App() {
 
   const vertical = edge === "left" || edge === "right";
   const expanded = hover && !dragging && (!!media || page === 1);
-  const mode: Mode = expanded ? "expanded" : stt.active ? "listening" : media ? "media" : "idle";
+  const mode: Mode = stt.active ? "listening" : expanded ? "expanded" : media ? "media" : "idle";
   const full = (stt.text + " " + stt.partial).trim();
   const done = stt.text.split(/\s+/).filter(Boolean), live = stt.partial.split(/\s+/).filter(Boolean);
   const toggleStt = () => (TAURI ? call("stt_toggle") : setStt((s) => ({ ...s, active: !s.active, text: s.active ? s.text : "", partial: s.active ? "" : "Dictation preview, words appear as you speak" })));
@@ -500,7 +500,7 @@ export default function App() {
             )}
             {mode === "listening" && (
               <motion.div key="listening" className="row" style={{ padding: "0 20px" }} custom={0} {...vp}>
-                <motion.div className="mic" animate={{ scale: [1, 1.08, 1] }} transition={{ repeat: Infinity, duration: 1.6 }}>{Icon.mic}</motion.div>
+                <motion.button className="mic" aria-label="Stop dictation" onClick={toggleStt} animate={{ scale: [1, 1.08, 1] }} transition={{ repeat: Infinity, duration: 1.6 }}>{Icon.mic}</motion.button>
                 <div className="col"><div className="tx sm">{full ? <div className="tw">{done.map((t, i) => <span key={"d" + i} className="w">{t} </span>)}{live.map((t, i) => <span key={"l" + i + t} className="w hint">{t} </span>)}</div> : <span className="hint">Listening…</span>}</div></div>
                 <Bars playing level={level} />
               </motion.div>
@@ -534,7 +534,7 @@ export default function App() {
                   <button className={`micbtn ${stt.active ? "on" : ""}`} onClick={toggleStt}>{Icon.mic}</button>
                   <div className="col">
                     <div className="title">Dictation</div>
-                    <div className="artist">{stt.err || recErr || (rec ? "Press your shortcut…" : stt.active ? "Listening…" : cfg.hold ? `Hold ${pretty(cfg.shortcut)}` : "Tap to dictate")}</div>
+                    <div className="artist">{stt.err || recErr || (rec ? "Press keys…" : cfg.hold ? "Hold to talk" : "Tap to talk")}</div>
                   </div>
                   <Bars playing={stt.active} level={stt.active ? level : undefined} />
                 </div>
@@ -546,14 +546,6 @@ export default function App() {
                     <button className={cfg.hold ? "on" : ""} onClick={() => setHold(true)}>Hold</button>
                     <button className={cfg.hold ? "" : "on"} onClick={() => setHold(false)}>Toggle</button>
                   </div>
-                </div>
-                <div className="tx">
-                  {full ? (
-                    <div className="tw">
-                      {done.map((t, i) => <span key={"d" + i} className="w">{t} </span>)}
-                      {live.map((t, i) => <span key={"l" + i + t} className="w hint">{t} </span>)}
-                    </div>
-                  ) : <span className="hint">{stt.active ? "Listening… start speaking" : cfg.hold ? `Hold ${pretty(cfg.shortcut)}, speak, then let go. Words are typed into the text field you have selected.` : `Tap the mic or press ${pretty(cfg.shortcut)}, then speak. Words are typed into the text field you have selected.`}</span>}
                 </div>
               </motion.div>
             )}
