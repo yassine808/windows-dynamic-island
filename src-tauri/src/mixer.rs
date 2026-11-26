@@ -7,6 +7,7 @@ pub struct Mix { pub vol: f32, pub mute: bool, pub mic: f32, pub mic_mute: bool,
 #[cfg(windows)]
 mod imp {
     use super::Mix;
+    use std::cell::RefCell;
     use windows::{
         core::Result,
         Win32::{
@@ -15,13 +16,28 @@ mod imp {
         },
     };
 
+    // The frontend polls the mixer every 500 ms while its page is open. Keep the device enumerator
+    // alive per worker thread instead of activating COM for it on every read; the default endpoint
+    // is still looked up fresh, so switching output/input devices keeps working.
+    thread_local! {
+        static ENUM: RefCell<Option<IMMDeviceEnumerator>> = const { RefCell::new(None) };
+    }
+
+    fn enumerator() -> Result<IMMDeviceEnumerator> {
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }; // no-op if this thread already has COM
+        ENUM.with(|e| {
+            let mut slot = e.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? });
+            }
+            Ok(slot.clone().unwrap())
+        })
+    }
+
     fn ep(flow: EDataFlow) -> Result<IAudioEndpointVolume> {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED); // no-op if this thread already has COM
-            let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-            let dev = en.GetDefaultAudioEndpoint(flow, eConsole)?;
-            dev.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
-        }
+        let en = enumerator()?;
+        let dev = unsafe { en.GetDefaultAudioEndpoint(flow, eConsole)? };
+        unsafe { dev.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) }
     }
     fn read(flow: EDataFlow) -> Option<(f32, bool)> {
         let e = ep(flow).ok()?;

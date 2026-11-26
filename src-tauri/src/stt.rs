@@ -119,7 +119,11 @@ pub fn start() {
 pub fn stop() {
     WANT.store(false, Ordering::Relaxed);
     if BROWSER.load(Ordering::Relaxed) {
-        STATE.lock().unwrap().active = false;
+        {
+            let mut s = STATE.lock().unwrap();
+            s.active = false;
+            s.text.clear(); // the words are typed, not kept: no transcript history in the app
+        }
         logf!("stt", "stop: browser engine");
         emit("stt://stop");
         return;
@@ -132,6 +136,7 @@ pub fn stop() {
         let was = s.active;
         s.active = false;
         s.partial.clear();
+        s.text.clear(); // the words are typed, not kept: no transcript history in the app
         was
     };
     logf!("stt", "stop requested (was_listening={was})");
@@ -213,7 +218,7 @@ mod imp {
         match a.Hypothesis().and_then(|h| h.Text()) {
             Ok(t) => {
                 let t = t.to_string();
-                logf!("stt", "hypothesis: {t:?}");
+                logf!("stt", "hypothesis: {} chars", t.chars().count());
                 let mut s = STATE.lock().unwrap();
                 if s.active { s.partial = t; }
             }
@@ -232,7 +237,7 @@ mod imp {
         match r.Text() {
             Ok(t) => {
                 let t = t.to_string();
-                logf!("stt", "result text: {t:?}");
+                logf!("stt", "result text: {} chars", t.chars().count());
                 if !t.trim().is_empty() {
                     let out = format!("{} ", t.trim());
                     let started = std::time::Instant::now();

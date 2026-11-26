@@ -66,7 +66,11 @@ so both files stay small and the app keeps logging.
   then press play. Pause and resume with the same button. When it reaches zero the island grows into
   an alarm pill with a looping chime and stays there, ringing, until you press **Stop**.
 - The collapsed pill shows the track's elapsed time while media plays; with nothing playing it shows
-  the normal 12-hour clock.
+  the normal 12-hour clock. A running timer takes that spot with a stopwatch icon, so the two numbers
+  are never confused, and it stays there when the music stops.
+- Idle use is kept low: the Stats samplers and `nvidia-smi` only run while the Stats page is open,
+  and the WinRT media manager and audio endpoint enumerator are cached instead of rebuilt on every
+  poll. The island behaves exactly the same.
 - Cursor stays the normal arrow over the island. The hand appears only on things you can click:
   buttons and sliders. During a real drag it becomes a grabbing hand.
 - Settings has a **Lock position** switch: the island stays where it is until you unlock it, while

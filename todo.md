@@ -108,9 +108,38 @@
 - [x] and fix issue where i have the button on hold, and i release it, yet the window keeps listening
 - [ ] also remove CI SonarCloud Code Analysis (skipped for now: GitHub App, see Notes)
 
+## Round 6 (done)
+
+- [x] Dictation pill: only the requested colors; the yellow is gone from the listening halo
+- [x] Dictation page: remove the transcript card, "Microphone ready" and "Edge streaming"; the words
+      are only shown live while listening and nothing is kept afterwards
+- [x] Collapsed pill: a running timer replaces the media progress, with a stopwatch icon so the two
+      times can never be confused; the number uses the player's exact size
+- [x] Collapsed pill with no media: the same timer + stopwatch icon instead of the clock
+- [x] Idle resources: the CPU/RAM/net sampler only refreshes while the Stats page is open
+- [x] Idle resources: `nvidia-smi` is no longer spawned every 1.5 s while the Stats page is closed
+- [x] Idle resources: the cursor-visibility query is skipped when no fullscreen app is in front
+- [x] Idle resources: one WinRT media manager and one audio endpoint enumerator per worker thread
+      instead of activating them on every poll
+- [x] Typecheck, frontend build, design checks, Rust check + tests, installer, install, commit, push
+
 ## Requests, as written (round 5)
 
 - [x] fix the issue, when i change resolution or connect to parsec, it doesnt show where it needs to be
+
+## Requests, as written (round 6)
+
+- [x] I only want to see these exact colors. Remove the yellow.
+- [x] remove the text that I recently said it in the app. I never want to see the history saved in the
+      app, I only want to see it in real time and that's it. Remove the card word, remove the extreme
+      in and remove the microphone ready.
+- [x] Also give the numbers of the timer the same size as the player because as you can see they are
+      not the same and I want you to add a notification for the timer so the user can tell which from
+      which. if the timer is active, then show it isntead of progress music with the icon, do the same
+      when no media is playing, show timer instead of time
+- [x] When you finish. I want you to optimize the app as much as you can. The very little lights on
+      the PC so it doesn't consume much of resources. But never change how the app behaves. And never
+      change the fontend
 
 ## Notes
 

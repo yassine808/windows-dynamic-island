@@ -41,7 +41,7 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 
 .glow { position: absolute; left: 0; top: 0; pointer-events: none; }
 .halo { position: absolute; inset: -3px; border-radius: inherit; filter: blur(14px); transition: background 0.6s; }
-.halo.siri { background: conic-gradient(from var(--a), #ff375f, #bf5af2, #0a84ff, #30d158, #ff9f0a, #ff375f); animation: spin 3s linear infinite; }
+.halo.siri { background: conic-gradient(from var(--a), #ff375f, #bf5af2, #0a84ff, #30d158, #ff375f); animation: spin 3s linear infinite; }
 @property --a { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
 @keyframes spin { to { --a: 360deg; } }
 
@@ -51,12 +51,15 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 /* docked on a side, the pill is 37 px wide: turn the clock so it reads along the pill */
 .row.idle.v { padding: 0; }
 .row.idle.v .pilltime { transform: rotate(-90deg); }
+.row.idle.v .timerstat { transform: rotate(-90deg); }
 .row.ex { flex-direction: column; align-items: stretch; justify-content: space-between; padding: 20px 20px 22px; gap: 0; }
 .empty { margin: auto; font-size: 15px; font-weight: 500; }
 .top { display: flex; gap: 14px; align-items: center; }
 .col { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .col.center { align-items: center; justify-content: center; }
 .pilltime { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.2px; white-space: nowrap; }
+.timerstat { display: inline-flex; align-items: center; gap: 7px; color: var(--label); }
+.timerstat svg { opacity: 0.6; flex: none; }
 
 .art { width: 24px; height: 24px; border-radius: 6px; background: var(--fill) center / cover; flex: none; }
 .art.big { width: 63px; height: 63px; border-radius: 12px; }
@@ -64,7 +67,6 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 .title { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .artist { font-size: 14px; color: var(--label-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .title.big { font-size: 26px; font-variant-numeric: tabular-nums; line-height: 1.1; }
-.tt { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ring { flex: none; display: block; }
 .micbtn svg { width: 18px; height: 20px; }
 .artist.err { white-space: normal; font-size: 12px; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: #ff8a80; }
@@ -121,15 +123,7 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 @keyframes wordin { from { opacity: 0; filter: blur(4px); } to { opacity: 1; filter: blur(0); } }
 .tx.sm { margin: 0; font-size: 15px; max-height: 40px; line-height: 1.25; justify-content: flex-end; text-align: center; color: var(--label-secondary); -webkit-mask-image: none; mask-image: none; }
 
-/* dictation report: a quiet iOS card with the live transcript and the microphone status */
-.dictcard { flex: 1; min-height: 0; margin: 10px 0 12px; padding: 10px 12px; border-radius: 16px; background: rgba(255, 255, 255, 0.055); display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; font-size: 16px; line-height: 1.35; font-weight: 500; }
-.dictcard .tw { text-align: left; }
-.dicthint { margin: auto; max-width: 260px; text-align: center; font-size: 13px; line-height: 1.35; color: var(--label-secondary); }
-.dictfoot { display: flex; flex-direction: column; gap: 8px; }
-.microw { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--label-secondary); white-space: nowrap; }
-.micdot { width: 6px; height: 6px; border-radius: 50%; background: #30d158; flex: none; }
-.micdot.warn { background: var(--red); }
-.msep { opacity: 0.45; }
+/* dictation: shortcut chip and hold/toggle, no transcript is kept or shown after a session */
 .chip.short { max-width: 158px; overflow: hidden; }
 .chipgroup { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .chip.reset { width: 28px; padding: 0; justify-content: center; background: var(--red); flex: none; }

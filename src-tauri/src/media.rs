@@ -13,6 +13,7 @@ pub struct MediaInfo {
 #[cfg(windows)]
 mod imp {
     use super::*;
+    use std::cell::RefCell;
     use windows::Media::Control::{
         GlobalSystemMediaTransportControlsSession as Session,
         GlobalSystemMediaTransportControlsSessionManager as Manager,
@@ -20,8 +21,24 @@ mod imp {
     };
     use windows::Storage::Streams::DataReader;
 
+    // The manager is expensive to activate (WinRT async round trip) and the frontend polls once a
+    // second; keep one per worker thread and just ask it for the current session each time.
+    thread_local! {
+        static MANAGER: RefCell<Option<Manager>> = const { RefCell::new(None) };
+    }
+
+    fn manager() -> Option<Manager> {
+        MANAGER.with(|m| {
+            let mut slot = m.borrow_mut();
+            if slot.is_none() {
+                *slot = Manager::RequestAsync().ok().and_then(|a| a.get().ok());
+            }
+            slot.clone()
+        })
+    }
+
     fn session() -> Option<Session> {
-        Manager::RequestAsync().ok()?.get().ok()?.GetCurrentSession().ok()
+        manager()?.GetCurrentSession().ok()
     }
 
     pub fn poll() -> Option<MediaInfo> {

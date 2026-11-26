@@ -299,7 +299,9 @@ autostart::autostart_get, autostart::autostart_set,
                         }
                     }
                     if now >= next_fs { fs = fullscreen_app(hwnd); next_fs = now + Duration::from_millis(250); }
-                    let cur = cursor_visible();
+                    // The cursor only tells exclusive from windowed fullscreen; skip the call entirely
+                    // while no fullscreen app is in front (the common case).
+                    let cur = !fs || cursor_visible();
                     // fullscreen game in front AND its cursor is hidden (mouse-look gameplay): island stays visible
                     // but never takes the mouse. If the cursor is showing (menus), the island stays usable.
                     let sup = fs && !cur;

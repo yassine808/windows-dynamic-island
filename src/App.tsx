@@ -12,8 +12,8 @@ type Mix = { vol: number; mute: boolean; mic: number; mic_mute: boolean; ok: boo
 type St = { cpu: number; ram: number; gpu: number; down: number; up: number };
 type MicInfo = { engine: boolean; perm: string };
 const PAGES = 6; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 settings
-// Each page keeps its own height. The dictation report and the settings rows need more room.
-const PAGE_H = [190, 236, 160, 140, 150, 286];
+// Each page keeps its own height. The settings rows need more room than the compact pages.
+const PAGE_H = [190, 132, 160, 140, 150, 286];
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 // one wheel of the timer picker: scroll over it (or click the dim numbers) to change the value; wraps around
@@ -165,12 +165,12 @@ function useStt() {
         setStt((s) => (s.partial === t ? s : { ...s, partial: t }));
         // visible proof in the log that words arrive while you speak
         const now = performance.now();
-        if (now - lastPartialLog.current > 700) { lastPartialLog.current = now; dbg(`stt: interim "${t.slice(-60)}"`); }
+        if (now - lastPartialLog.current > 700) { lastPartialLog.current = now; dbg(`stt: interim ${t.length} chars`); }
       },
       final: (t) => {
         if (!alive) return;
         setStt((s) => ({ ...s, text: `${s.text}${t} `, partial: "" }));
-        dbg(`stt: final "${t}"`);
+        dbg(`stt: final ${t.length} chars`);
         call("stt_type", { text: t });
       },
       error: (msg) => {
@@ -184,7 +184,8 @@ function useStt() {
       end: () => {
         if (!alive || reported) return;
         reported = true;
-        setStt((s) => (s.active || s.partial ? { ...s, active: false, partial: "" } : s));
+        // the words were typed into the focused field; nothing is kept in the app afterwards
+        setStt((s) => (s.active || s.partial || s.text ? { ...s, active: false, partial: "", text: "" } : s));
         call("stt_ended"); // keep the Rust state machine in sync when the engine stops by itself
       },
       debug: (m) => dbg(`stt: ${m}`),
@@ -330,6 +331,11 @@ function ProgressText({ m }: { m: NonNullable<Media> }) {
   const pos = Math.min(d || 1e12, Math.max(0, m.position + (m.playing ? performance.now() - m.at : 0)));
   return <span className="pilltime">{fmt(pos)}</span>;
 }
+// The running timer takes the player's place in the collapsed pill, with a stopwatch so the two
+// times can never be confused. Same .pilltime as the track, so both are exactly the same size.
+function TimerText({ left, done }: { left: number; done: boolean }) {
+  return <span className="timerstat">{Icon.timer}<span className="pilltime">{done ? "Done" : fmtT(left)}</span></span>;
+}
 const Ring = ({ frac, size, done }: { frac: number; size: number; done?: boolean }) => {
   const sw = size > 30 ? 4 : 3, rr = (size - sw) / 2, c = 2 * Math.PI * rr;
   return (
@@ -396,6 +402,7 @@ const Icon = {
   bell: <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 2a2 2 0 0 0-2 2v.55C6.9 5.6 5 8.35 5 11.65V16l-2 2v1h18v-1l-2-2v-4.35c0-3.3-1.9-6.05-5-7.1V4a2 2 0 0 0-2-2zm0 20a3 3 0 0 0 3-3H9a3 3 0 0 0 3 3z" /></svg>,
   mic: <svg viewBox="0 0 24 24" width="20" height="20" fill="#fff"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z" /></svg>,
   reset: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M4.5 10a8 8 0 1 1 2.2 6.4" /><path d="M4.5 4.5V10H10" /></svg>,
+  timer: <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="13" r="8" /><path d="M12 9v4l2.6 2.1" /><path d="M9 2.5h6" /><path d="M12 2.5v2.5" /></svg>,
 };
 
 // play <-> pause morph, like SF Symbols' content transition
@@ -417,7 +424,7 @@ const pageV = {
 export default function App() {
   const { media, art, setMedia, freeze } = useMedia();
   const tint = useTint(art);
-  const { stt, setStt, mic } = useStt();
+  const { stt, setStt } = useStt();
   const [page, setPage] = useState(0);
   const [dir, setDir] = useState(0);
   const [hover, setHover] = useState(false);
@@ -573,11 +580,12 @@ export default function App() {
 
   const ex = useMotionValue(innerWidth / 2), ey = useMotionValue(0);
   const fx = useMotionValue(0.5), fy = useMotionValue(0);
-  // Spawn: keep the island hidden and seed it at almost zero size, then grow it out of the edge it
-  // will live on. Without this the first frame starts at the overlay centre and slides sideways to
-  // the primary monitor's centre before the monitor list arrives.
+  // Spawn: the island is hidden until the monitor list arrives, seeded at its final edge position
+  // at full size, then scaled up from that edge point. Scaling (instead of animating width and
+  // height) is what makes it grow out of the edge like a tree, with no sideways slide.
   const [placed, setPlaced] = useState(!TAURI);
-  const w = useMotionValue(TAURI ? 2 : 126), h = useMotionValue(TAURI ? 2 : 37), r = useMotionValue(TAURI ? 1 : 18.5), lift = useMotionValue(1), flat = useMotionValue(1);
+  const w = useMotionValue(126), h = useMotionValue(37), r = useMotionValue(18.5), lift = useMotionValue(1), flat = useMotionValue(1);
+  const spawn = useMotionValue(TAURI ? 0.2 : 1);
   const rad = useTransform([r, flat], (v: number[]) => {
     const o = Math.max(0, v[0] * (1 - v[1])), i = v[0], e = edgeRef.current;
     if (e === "top") return `${o}px ${o}px ${i}px ${i}px`;
@@ -588,6 +596,7 @@ export default function App() {
   const ear = useTransform(r, (v) => `${(v * 0.36).toFixed(2)}px`);
   const x = useTransform([ex, w, fx], (v: number[]) => v[0] - v[1] * v[2]);
   const y = useTransform([ey, h, fy], (v: number[]) => v[0] - v[1] * v[2]);
+  const scale = useTransform([lift, spawn], (v: number[]) => v[0] * v[1]);
 
   useMic(stt.active, level);
 
@@ -604,6 +613,7 @@ export default function App() {
   const expanded = (hover || pin) && !dragging && !tm.done;
   // Hovering while dictating expands the full report; away from it, the compact island shows the words.
   const mode: Mode = tm.done ? "alarm" : stt.active && !expanded ? "listening" : expanded ? "expanded" : media ? "media" : timerActive ? "timer" : "idle";
+  const modeRef = useRef(mode); modeRef.current = mode;
   const full = (stt.text + " " + stt.partial).trim();
   const done = stt.text.split(/\s+/).filter(Boolean), live = stt.partial.split(/\s+/).filter(Boolean);
   // a toggle can be triggered twice by one physical click; ignore the echo
@@ -833,12 +843,12 @@ export default function App() {
     }
     let last = "";
     const push = () => {
-      const s = lift.get(), cw = w.get() * s, ch = h.get() * s;
+      const s = lift.get() * spawn.get(), cw = w.get() * s, ch = h.get() * s;
       const px = x.get() - (cw - w.get()) / 2, py = y.get() - (ch - h.get()) / 2;
       const k = [px, py, cw, ch].map((n) => Math.round(n)).join();
       if (k !== last) { last = k; invoke("set_hit_rect", { x: px, y: py, w: cw, h: ch }); }
     };
-    const stops = [x, y, w, h, lift].map((v) => v.on("change", push));
+    const stops = [x, y, w, h, lift, spawn].map((v) => v.on("change", push));
     push();
     return () => stops.forEach((off) => off());
   }, [fsHide, placed]);
@@ -1012,9 +1022,10 @@ export default function App() {
       const horiz = edgeRef.current === "top" || edgeRef.current === "bottom";
       if (initial) {
         along.current = keep.x + keep.w / 2;
-        // Snap to the edge before the first visible frame: the target position does not depend on
-        // the pill's size while it is un-tucked, so growing from 2 px never slides sideways.
-        const t = target(edgeRef.current, along.current, { w: 1, h: 1 }, false, keep);
+        // Seed the final position with the real starting size, so the grow-in is a pure scale from
+        // the edge: no spring can drag the centre sideways after the first frame.
+        const s = sizeOf(modeRef.current, edgeRef.current === "left" || edgeRef.current === "right", false, 0);
+        const t = target(edgeRef.current, along.current, s, false, keep);
         ex.set(t.ex); ey.set(t.ey); fx.set(t.fx); fy.set(t.fy);
         dbg(`spawn: seeded at ${Math.round(t.ex)},${Math.round(t.ey)} on ${Math.round(keep.w)}x${Math.round(keep.h)}`);
       } else {
@@ -1038,6 +1049,9 @@ export default function App() {
     return () => { gone = true; un?.(); };
   }, []);
 
+  // The first frame after placement is the seed at the edge; pop it open from there.
+  useEffect(() => { if (placed) animate(spawn, 1, spring); }, [placed]);
+
   const control = (action: string) => {
     if (!TAURI && media) setMedia({ ...media, playing: action === "toggle" ? !media.playing : media.playing });
     call("media_control", { action });
@@ -1045,11 +1059,13 @@ export default function App() {
   const artEl = (big = false) => <div className={`art ${big ? "big" : ""}`} style={{ backgroundImage: art ? `url("${art}")` : undefined }} />;
 
   const siri = mode === "listening";
-  const box = { x, y, width: w, height: h, scale: lift };
+  // scale from the point where the island touches the screen edge, like a tree growing out of it
+  const origin = edge === "top" ? "50% 0%" : edge === "bottom" ? "50% 100%" : edge === "left" ? "0% 50%" : "100% 50%";
+  const box = { x, y, width: w, height: h, scale, transformOrigin: origin };
   const vp = { variants: pageV, initial: "initial", animate: "animate", exit: "exit" } as const;
   return (
     <div className={`stage ${dragging ? "dragging" : ""} ${fsHide ? "fsgone" : ""}`} style={{ ["--accent" as string]: tint ? `color-mix(in srgb, ${tint} 55%, white)` : "#fff" }}>
-      <motion.div className="glow" style={{ ...box, borderRadius: rad }} animate={{ opacity: siri ? 0.35 : tint && media ? (mode === "expanded" ? 0.16 : 0.1) : 0 }} transition={{ duration: 0.6 }}>
+      <motion.div className="glow" style={{ ...box, borderRadius: rad }} animate={{ opacity: placed ? (siri ? 0.35 : tint && media ? (mode === "expanded" ? 0.16 : 0.1) : 0) : 0 }} transition={{ duration: 0.6 }}>
         <div className={`halo ${siri ? "siri" : ""}`} style={{ background: siri ? undefined : tint }} />
       </motion.div>
       <motion.div
@@ -1065,8 +1081,7 @@ export default function App() {
             {mode === "media" && media && (
               <motion.div key={"media" + vertical} className={`row ${vertical ? "v" : ""}`} custom={0} {...vp}>
                 {artEl()}
-                {!vertical && <div className="col center"><ProgressText m={media} /></div>}
-                {!vertical && timerActive && <span className="tt">{tm.done ? "Done" : fmtT(tm.left)}</span>}
+                {!vertical && <div className="col center">{timerActive ? <TimerText left={tm.left} done={tm.done} /> : <ProgressText m={media} />}</div>}
                 <Bars playing={media.playing} />
               </motion.div>
             )}
@@ -1076,9 +1091,8 @@ export default function App() {
               </motion.div>
             )}
             {mode === "timer" && (
-              <motion.div key={"timer" + vertical} className={`row ${vertical ? "v" : ""}`} custom={0} {...vp}>
-                <Ring frac={tm.total ? tm.left / tm.total : 0} size={22} done={tm.done} />
-                {!vertical && <span className="tt">{tm.done ? "Done" : fmtT(tm.left)}</span>}
+              <motion.div key={"timer" + vertical} className={`row idle ${vertical ? "v" : ""}`} custom={0} {...vp}>
+                <TimerText left={tm.left} done={tm.done} />
               </motion.div>
             )}
             {mode === "listening" && (
@@ -1125,34 +1139,21 @@ export default function App() {
                   <div className="col">
                     <div className="title">Dictation</div>
                     <div className={`artist ${stt.err || recErr ? "err" : ""}`}>
-                      {recErr || stt.err || (rec ? "Press a key or mouse button…" : stt.active ? "Listening…" : stt.text.trim() ? `${done.length} words · Tap to talk` : cfg.hold ? "Hold to talk" : "Tap to talk")}
+                      {recErr || stt.err || (rec ? "Press a key or mouse button…" : stt.active ? "Listening…" : cfg.hold ? "Hold to talk" : "Tap to talk")}
                     </div>
                   </div>
                   <Bars playing={stt.active} level={stt.active ? level : undefined} />
                 </div>
-                <div className="dictcard">
-                  {full
-                    ? <div className="tw">{done.map((t, i) => <span key={"d" + i} className="w">{t} </span>)}{live.map((t, i) => <span key={"l" + i + t} className="w hint">{t} </span>)}</div>
-                    : <div className="dicthint">{stt.active ? "Listening…" : cfg.hold ? "Hold the shortcut and talk. The words appear here as you speak." : "Press the shortcut and talk. The words appear here as you speak."}</div>}
-                </div>
-                <div className="dictfoot">
-                  <div className="microw">
-                    <i className={`micdot ${mic.engine && mic.perm !== "denied" ? "" : "warn"}`} />
-                    <span>{mic.engine ? (mic.perm === "denied" ? "Microphone blocked" : "Microphone ready") : "Windows speech"}</span>
-                    <span className="msep">·</span>
-                    <span>{mic.engine ? "Edge streaming" : "On-device WinRT"}</span>
+                <div className="cfg">
+                  <div className="chipgroup">
+                    <button className={`chip short ${rec ? "rec" : ""}`} aria-label="Record shortcut" onClick={record}>
+                      <i className="dot" />{rec ? (recErr || "Press keys or mouse…") : pretty(cfg.shortcut)}
+                    </button>
+                    <button className="chip reset" aria-label="Reset shortcut to Ctrl Alt Space" title="Reset to Ctrl + Alt + Space" onClick={resetShortcut}>{Icon.reset}</button>
                   </div>
-                  <div className="cfg">
-                    <div className="chipgroup">
-                      <button className={`chip short ${rec ? "rec" : ""}`} aria-label="Record shortcut" onClick={record}>
-                        <i className="dot" />{rec ? (recErr || "Press keys or mouse…") : pretty(cfg.shortcut)}
-                      </button>
-                      <button className="chip reset" aria-label="Reset shortcut to Ctrl Alt Space" title="Reset to Ctrl + Alt + Space" onClick={resetShortcut}>{Icon.reset}</button>
-                    </div>
-                    <div className="seg" role="group" aria-label="Shortcut mode">
-                      <button className={cfg.hold ? "on" : ""} onClick={() => setHold(true)}>Hold</button>
-                      <button className={cfg.hold ? "" : "on"} onClick={() => setHold(false)}>Toggle</button>
-                    </div>
+                  <div className="seg" role="group" aria-label="Shortcut mode">
+                    <button className={cfg.hold ? "on" : ""} onClick={() => setHold(true)}>Hold</button>
+                    <button className={cfg.hold ? "" : "on"} onClick={() => setHold(false)}>Toggle</button>
                   </div>
                 </div>
               </motion.div>
