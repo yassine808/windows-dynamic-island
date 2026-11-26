@@ -5,6 +5,8 @@ lives on the screen edge.
 
 ![CI](https://github.com/yassine808/windows-dynamic-island/actions/workflows/ci.yml/badge.svg)
 
+**[Download the latest version](https://github.com/yassine808/windows-dynamic-island/releases/latest)** — Windows 10/11, no administrator rights.
+
 ![Dictation: the collapsed pill shows words as you speak](docs/listening.png)
 
 | Media controls | Dictation |
@@ -21,8 +23,8 @@ lives on the screen edge.
 
 ## Install
 
-Download `IslandWin_0.1.0_x64-setup.exe` from the
-[releases page](https://github.com/yassine808/windows-dynamic-island/releases) and run it. It needs
+Download `IslandWin_0.1.1_x64-setup.exe` from the
+[latest release](https://github.com/yassine808/windows-dynamic-island/releases/latest) and run it. It needs
 no administrator rights: the app goes to `%LOCALAPPDATA%\IslandWin`, and WebView2 is already on
 Windows 11 (the setup downloads it on Windows 10 if it is missing).
 
@@ -95,7 +97,7 @@ Media, Dictation, Timer, Mixer, Stats, Settings.
 1. Install Node 20+, Rust (stable MSVC) and WebView2 (preinstalled on Windows 11).
 2. `npm install`
 3. `npm run tauri dev` for the live app, `npm run tauri build` for
-   `src-tauri/target/release/bundle/nsis/IslandWin_0.1.0_x64-setup.exe`.
+   `src-tauri/target/release/bundle/nsis/IslandWin_0.1.1_x64-setup.exe`.
 
 The installer hook (`src-tauri/windows/installer.nsh`) adds the Run entry, and the app keeps it
 pointing at the executable it is actually running from, so moving the app does not break autostart.

@@ -138,6 +138,14 @@
       hidden, and hovering the sliver brings it back
 - [x] Typecheck, frontend build, design checks, Rust check + tests, installer, install, commit, push
 
+## Round 9 (done)
+
+- [x] README: a "Download the latest version" link to the newest GitHub release
+- [x] GitHub About: the same download link and a one-line repository description
+- [x] Release `v0.1.1`: version bumped, setup built, tag pushed, and the GitHub release published
+      with the installer as the latest release
+- [x] Typecheck, frontend build, design checks, Rust check + tests, installer, commit, push
+
 ## Requests, as written (round 5)
 
 - [x] fix the issue, when i change resolution or connect to parsec, it doesnt show where it needs to be
@@ -165,6 +173,11 @@
 - [x] what i want, if the setting is on. the behavoiur should be the following. when im using the
       windowsFS app, the island shouldnt be 100% hidden, even if cursor is visible in the app
 - [x] is still doesnt work. i have auto hide on wFS, yet it shows fully
+
+## Requests, as written (round 9)
+
+- [x] In GitHub I wanted to add the link to download the latest version, add tagsThen push the git
+      release the latest version, the setup.
 
 ## Notes
 
