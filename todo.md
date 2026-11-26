@@ -50,6 +50,20 @@
 - [x] Log file never grows past roughly 2 MB; rotate one previous file
 - [x] Check and test everything, update README and screenshots, build the installer, commit and push
 
+## Round 4 (done)
+
+- [x] Dictation: one long-lived recognition thread. The recognizer and its dictation grammar are
+      built at launch, so a press only starts the continuous session instead of paying ~0.4-0.6 s of
+      setup every time. A tap that starts and stops before the session runs keeps the warm recognizer
+- [x] Dictation: state changes are pushed to the island (`stt://state`) instead of waiting for the
+      100 ms poll
+- [x] Launch: the island grows out of its own edge at its final position; it no longer appears in the
+      middle of the screen and slides sideways
+- [x] Page scroll: a flick turns a page every 140 ms instead of 320 ms
+- [x] Cursor: hand only over clickable controls, default everywhere else
+- [x] Remove the SonarCloud Code Analysis CI job
+- [x] Typecheck, frontend build, design checks, Rust check + tests, installer, install, commit, push
+
 ## Requests, as written
 
 - [x] Restore the previous non-uniform page heights. Do not make every page the same height.
@@ -83,6 +97,16 @@
 - [x] Build the app when done.
 - [x] Write everything from this prompt and the previous one in `todo.md`, exactly as written, with check
   boxes. When finished, check the boxes and push to git.
+
+## Requests, as written (round 4)
+
+- [x] remove scroll delay between pages, keep it as it was
+- [x] Make the startup animation grows from the edge ( spawns ), not from right to left
+- [x] Also fix the cursor
+- [x] Cursor: hand only over clickable controls!!
+- [x] Also fix bug where the STT doesnt work as it should ,see logs
+- [x] and fix issue where i have the button on hold, and i release it, yet the window keeps listening
+- [x] also remove CI SonarCloud Code Analysis
 
 ## Notes
 

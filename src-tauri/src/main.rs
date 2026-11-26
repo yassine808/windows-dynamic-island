@@ -189,6 +189,9 @@ autostart::autostart_get, autostart::autostart_set,
         .setup(move |app| {
             logf!("win", "setup: initialising the dictation shortcut");
             stt::bind(app.handle().clone());
+            // Warm the recognition thread now: its WinRT apartment and (when speech is already
+            // configured) the compiled dictation grammar are ready before the first key press.
+            stt::warm();
             hotkey::init();
             autostart::init();
             if let Err(e) = tray::init(app.handle()) { logf!("tray", "could not add the tray icon: {e}"); }

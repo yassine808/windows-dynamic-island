@@ -194,6 +194,14 @@ function useStt() {
     const sub = (p: Promise<() => void>) => p.then((f) => (gone ? f() : offs.push(f))).catch(() => {});
     sub(listen("stt://start", () => { if (!alive) return; reported = false; setStt((s) => ({ ...s, active: true, err: "", text: "", partial: "" })); rec.start(); }));
     sub(listen("stt://stop", () => rec.stop()));
+    // Windows engine state changes land immediately instead of waiting for the next poll.
+    sub(listen("stt://state", () => {
+      if (!alive || local.current) return;
+      invoke<Stt>("stt_state").then((s) => {
+        const k = JSON.stringify(s);
+        if (k !== last.current) { last.current = k; setStt(s); }
+      }).catch(() => {});
+    }));
     return () => { alive = false; gone = true; rec.abort(); offs.forEach((f) => f()); };
   }, []);
   // Windows recognizer fallback: polled only while the browser engine is not in charge.
@@ -565,7 +573,11 @@ export default function App() {
 
   const ex = useMotionValue(innerWidth / 2), ey = useMotionValue(0);
   const fx = useMotionValue(0.5), fy = useMotionValue(0);
-  const w = useMotionValue(126), h = useMotionValue(37), r = useMotionValue(18.5), lift = useMotionValue(1), flat = useMotionValue(1);
+  // Spawn: keep the island hidden and seed it at almost zero size, then grow it out of the edge it
+  // will live on. Without this the first frame starts at the overlay centre and slides sideways to
+  // the primary monitor's centre before the monitor list arrives.
+  const [placed, setPlaced] = useState(!TAURI);
+  const w = useMotionValue(TAURI ? 2 : 126), h = useMotionValue(TAURI ? 2 : 37), r = useMotionValue(TAURI ? 1 : 18.5), lift = useMotionValue(1), flat = useMotionValue(1);
   const rad = useTransform([r, flat], (v: number[]) => {
     const o = Math.max(0, v[0] * (1 - v[1])), i = v[0], e = edgeRef.current;
     if (e === "top") return `${o}px ${o}px ${i}px ${i}px`;
@@ -778,15 +790,15 @@ export default function App() {
       setDir(d);
       setPage((p) => Math.max(0, Math.min(PAGES - 1, p + d)));
       s.t = performance.now();
-      // one page per beat; a long gesture still reaches the last page, but it never skips pages
-      if (Math.abs(s.acc) >= 100) s.timer = window.setTimeout(tick, 320);
+      // a fast flick turns one page per frame-ish instead of skipping; the rest is not capped
+      if (Math.abs(s.acc) >= 100) s.timer = window.setTimeout(tick, 140);
     };
-    if (!s.timer) s.timer = window.setTimeout(tick, Math.max(0, 320 - (now - s.t)));
+    if (!s.timer) s.timer = window.setTimeout(tick, Math.max(0, 140 - (now - s.t)));
   };
 
   // spring everything to its target
   useEffect(() => {
-    if (dragging) return;
+    if (dragging || !placed) return;
     const s = sizeOf(mode, vertical, hover, page);
     const t = target(edge, along.current, s, tucked, monRef.current);
     const key = `${edge}|${nonce}`, fly = key !== flyKey.current; // fly = just released from a drag
@@ -795,7 +807,7 @@ export default function App() {
     animate(ex, t.ex, fly ? move : settle); animate(ey, t.ey, fly ? move : settle);
     animate(fx, t.fx, move); animate(fy, t.fy, move);
     animate(lift, 1, move); animate(flat, 1, spring);
-  }, [edge, mode, hover, tucked, dragging, nonce, page]);
+  }, [edge, mode, hover, tucked, dragging, nonce, page, placed]);
 
   // tuck into the edge when idle (if that edge's axis is enabled)
   useEffect(() => {
@@ -813,6 +825,7 @@ export default function App() {
   // island costs nothing instead of running a 60 Hz timer
   useEffect(() => {
     if (!TAURI) return;
+    if (!placed) return; // nothing to hit until the spawn placement is known
     if (fsHide) {
       // invisible means untouchable: keep the click-through target at zero so a game still gets the mouse
       invoke("set_hit_rect", { x: 0, y: 0, w: 0, h: 0 });
@@ -828,7 +841,7 @@ export default function App() {
     const stops = [x, y, w, h, lift].map((v) => v.on("change", push));
     push();
     return () => stops.forEach((off) => off());
-  }, [fsHide]);
+  }, [fsHide, placed]);
 
   // drag + snap
   const d = useRef<{ gx: number; gy: number; sx: number; sy: number; on: boolean; vx: number; vy: number; lx: number; ly: number; lt: number; lock: boolean; hz: boolean; mid: number } | null>(null);
@@ -976,12 +989,19 @@ export default function App() {
   useEffect(() => {
     if (!TAURI) return;
     invoke<number[][]>("get_monitors").then((l) => {
-      if (!l.length) return;
-      mons.current = l.map(([x, y, w, h]) => ({ x, y, w, h }));
-      monRef.current = mons.current[0];
-      along.current = mons.current[0].x + mons.current[0].w / 2;
+      if (l.length) {
+        mons.current = l.map(([x, y, w, h]) => ({ x, y, w, h }));
+        monRef.current = mons.current[0];
+        along.current = mons.current[0].x + mons.current[0].w / 2;
+        // Snap to the edge before the first visible frame: the target position does not depend on
+        // the pill's size while it is un-tucked, so growing from 2 px never slides sideways.
+        const t = target(edgeRef.current, along.current, { w: 1, h: 1 }, false, monRef.current);
+        ex.set(t.ex); ey.set(t.ey); fx.set(t.fx); fy.set(t.fy);
+        dbg(`spawn: seeded at ${Math.round(t.ex)},${Math.round(t.ey)} on ${Math.round(monRef.current.w)}x${Math.round(monRef.current.h)}`);
+      }
+      setPlaced(true);
       setNonce((n) => n + 1);
-    });
+    }).catch(() => setPlaced(true));
   }, []);
 
   const control = (action: string) => {
@@ -1000,7 +1020,7 @@ export default function App() {
       </motion.div>
       <motion.div
         className="shell"
-        style={box}
+        style={{ ...box, opacity: placed ? 1 : 0 }}
         onPointerDown={down} onPointerMove={mv} onPointerUp={up} onPointerCancel={up} onWheel={onWheel}
         onPointerEnter={() => !TAURI && setHover(true)} onPointerLeave={() => !TAURI && setHover(false)}
       >

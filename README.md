@@ -58,6 +58,8 @@ so both files stay small and the app keeps logging.
   push-to-talk or press-to-start/stop.
 - Finished phrases are typed into whatever text field has focus. Needs
   Settings > Privacy > Speech > Online speech recognition.
+- The Windows recognizer is built once at launch on a background thread, so a press starts listening
+  instead of compiling the dictation grammar again, and start/stop reach the island immediately.
 - Timer: pick 5, 15 or 25 minutes to fill the hours / minutes wheels, or turn the wheels yourself,
   then press play. Pause and resume with the same button. When it reaches zero the island grows into
   an alarm pill with a looping chime and stays there, ringing, until you press **Stop**.

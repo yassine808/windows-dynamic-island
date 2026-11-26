@@ -13,7 +13,7 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 /* a fullscreen window or app owns the screen: the island fades out and stops taking clicks */
 .stage.fsgone { opacity: 0; pointer-events: none; }
 
-.shell { position: absolute; left: 0; top: 0; touch-action: none; }
+.shell { position: absolute; left: 0; top: 0; touch-action: none; transition: opacity 0.16s ease; }
 .stage, .stage * { cursor: default; }
 /* hand cursor only on things that can be clicked: every button and the seek bars */
 .stage button, .stage button *, .stage .seek:not(.off), .stage .seek:not(.off) * { cursor: pointer; }

@@ -63,6 +63,8 @@ foreach ($ln in Get-Content $Log) {
 
   # a press opens a session; whatever the previous session got is closed as it stands
   if ($body -like "start: browser engine listening") { & $flush; $cur = New-Session $ts "browser" $off; continue }
+  # new builds keep one warm worker; older ones spawned it on every press
+  if ($body -like "start: requesting the WinRT worker*") { & $flush; $cur = New-Session $ts "winrt" $off; continue }
   if ($body -like "start: spawning the recognition worker*") { & $flush; $cur = New-Session $ts "winrt" $off; continue }
   if ($body -match '^engine -> (browser|winrt).*model=(\S+)$') { $models[$Matches[1]] = $Matches[2]; continue }
   if ($null -eq $cur) { continue }
@@ -80,7 +82,7 @@ foreach ($ln in Get-Content $Log) {
     $cur.TypeMs += [double]::Parse($Matches[2], [cultureinfo]::InvariantCulture)
     $cur.TypeAt = $off
   }
-  elseif ($body -like "run: listening") { if ($null -eq $cur.StartAt) { $cur.StartAt = $off } }
+  elseif ($body -like "run: listening" -or $body -eq "worker: listening") { if ($null -eq $cur.StartAt) { $cur.StartAt = $off } }
   elseif ($body -match '^hypothesis: "(.*)"$') { if ($null -eq $cur.FirstAt) { $cur.FirstAt = $off }; $cur.Sample = $Matches[1] }
   elseif ($body -match '^result text: "(.*)"$') {
     if ($null -eq $cur.FirstAt) { $cur.FirstAt = $off }
@@ -90,7 +92,7 @@ foreach ($ln in Get-Content $Log) {
     $cur.TypeMs += [double]::Parse($Matches[1], [cultureinfo]::InvariantCulture)
     $cur.TypeAt = $off
   }
-  elseif ($body -like "worker: stopped, transcript is*") { & $flush }
+  elseif ($body -like "worker: stopped in *" -or $body -like "worker: stopped, transcript is*") { & $flush }
 }
 & $flush
 

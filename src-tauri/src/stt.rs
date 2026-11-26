@@ -11,7 +11,6 @@ use tauri::Emitter;
 pub struct SttState { pub active: bool, pub partial: String, pub text: String, pub err: String }
 
 static STATE: Mutex<SttState> = Mutex::new(SttState { active: false, partial: String::new(), text: String::new(), err: String::new() });
-static STOP: Mutex<Option<Sender<()>>> = Mutex::new(None);
 /// true = push-to-talk (listen while the shortcut is held), false = press once to start, again to stop
 pub static HOLD: AtomicBool = AtomicBool::new(false);
 pub fn hold() -> bool { HOLD.load(Ordering::Relaxed) }
@@ -25,6 +24,24 @@ static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 pub fn bind(app: tauri::AppHandle) { let _ = APP.set(app); }
 fn emit(ev: &str) { if let Some(a) = APP.get() { let _ = a.emit(ev, ()); } }
+
+/// Commands handled by the single, long-lived recognition thread. Keeping the thread (and the
+/// recognizer it owns) alive removes the ~400-600 ms setup cost from every press: only the first
+/// press compiles the dictation constraint, later presses just start the continuous session.
+enum Cmd { Start, Stop }
+static CMD: OnceLock<Sender<Cmd>> = OnceLock::new();
+
+fn sender() -> &'static Sender<Cmd> {
+    CMD.get_or_init(|| {
+        let (tx, rx) = channel();
+        thread::spawn(move || imp::worker(rx));
+        tx
+    })
+}
+
+/// Start the recognition thread at boot so its COM apartment and, when possible, the recognizer
+/// are ready before the first shortcut press. A failure here is silent (no Settings popup).
+pub fn warm() { let _ = sender(); }
 
 /// Called by the UI once it has detected the browser speech engine.
 #[tauri::command]
@@ -43,6 +60,7 @@ pub fn stt_ended() {
     s.partial.clear();
     drop(s);
     logf!("stt", "browser engine reported the session ended");
+    emit("stt://state");
 }
 
 /// Type a finished phrase into the focused window (same SendInput path the WinRT engine uses).
@@ -80,43 +98,22 @@ pub fn start() {
         emit("stt://start");
         return;
     }
-    // In hold mode a quick re-press can land while the previous session is still closing; queue it
-    // instead of dropping the press ("start ignored" used to lose the whole utterance).
     if STATE.lock().unwrap().active {
-        logf!("stt", "start: previous session still closing, queued");
-        thread::spawn(|| {
-            for _ in 0..100 {
-                if !WANT.load(Ordering::Relaxed) { logf!("stt", "start: queued press cancelled"); return; }
-                if !STATE.lock().unwrap().active { break; }
-                thread::sleep(Duration::from_millis(20));
-            }
-            start_now();
-        });
+        logf!("stt", "start: already listening");
         return;
     }
-    start_now();
-}
-
-fn start_now() {
-    if !WANT.load(Ordering::Relaxed) || STATE.lock().unwrap().active { return; }
-    let (tx, rx) = channel();
-    *STOP.lock().unwrap() = Some(tx);
+    // The UI shows listening right away; the worker reports a failure (and flips this back) if the
+    // recognizer cannot start.
     *STATE.lock().unwrap() = SttState { active: true, ..Default::default() };
-    logf!("stt", "start: spawning the recognition worker (hold={})", hold());
-    std::thread::spawn(move || {
-        logf!("stt", "worker: running");
-        match imp::run(rx) {
-            Ok(()) => logf!("stt", "worker: recognizer closed cleanly"),
-            Err(e) => {
-                logf!("stt", "worker: failed: {e}");
-                STATE.lock().unwrap().err = e;
-            }
-        }
+    emit("stt://state");
+    logf!("stt", "start: requesting the WinRT worker (hold={})", hold());
+    if sender().send(Cmd::Start).is_err() {
         let mut s = STATE.lock().unwrap();
         s.active = false;
-        s.partial.clear();
-        logf!("stt", "worker: stopped, transcript is {} chars", s.text.len());
-    });
+        s.err = "Dictation worker is not running".into();
+        drop(s);
+        emit("stt://state");
+    }
 }
 
 pub fn stop() {
@@ -127,25 +124,40 @@ pub fn stop() {
         emit("stt://stop");
         return;
     }
-    let had = STOP.lock().unwrap().take();
-    logf!("stt", "stop requested ({})", if had.is_some() { "session running" } else { "nothing running" });
-    if let Some(tx) = had { let _ = tx.send(()); }
+    // Stop the UI immediately. The worker stops the WinRT session in the background; waiting for
+    // StopAsync used to leave the island listening for up to 20 seconds after the shortcut was
+    // released.
+    let was = {
+        let mut s = STATE.lock().unwrap();
+        let was = s.active;
+        s.active = false;
+        s.partial.clear();
+        was
+    };
+    logf!("stt", "stop requested (was_listening={was})");
+    if was { emit("stt://state"); }
+    if let Some(tx) = CMD.get() { let _ = tx.send(Cmd::Stop); }
 }
 
 #[cfg(windows)]
 mod imp {
     use super::*;
     use windows::{
-        Foundation::TypedEventHandler,
+        core::HSTRING,
+        Foundation::{AsyncStatus, TypedEventHandler},
         Media::SpeechRecognition::{
             SpeechContinuousRecognitionResultGeneratedEventArgs as ResArgs, SpeechContinuousRecognitionSession as Session,
-            SpeechRecognitionHypothesisGeneratedEventArgs as HypArgs, SpeechRecognitionResultStatus, SpeechRecognizer,
+            SpeechRecognitionHypothesisGeneratedEventArgs as HypArgs, SpeechRecognitionResultStatus, SpeechRecognitionScenario,
+            SpeechRecognitionTopicConstraint, SpeechRecognizer,
         },
         Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY},
     };
 
     /// Stamped on every event this module injects: the shortcut recorder treats it as its own noise.
     const OURS: usize = 0x49534C57; // "ISLW"
+
+    /// A recognizer plus its continuous session. Built once on the worker thread and reused.
+    struct Engine { _rec: SpeechRecognizer, sess: Session }
 
     fn key(vk: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
         INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: OURS } } }
@@ -184,94 +196,170 @@ mod imp {
     /// Public wrapper so the browser engine can reuse the same SendInput path.
     pub fn type_out(s: &str) -> Result<usize, String> { type_text(s) }
 
-    pub fn run(rx: Receiver<()>) -> Result<(), String> {
-        // this worker thread needs its own WinRT apartment before touching SpeechRecognizer
-        let hr = unsafe { windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED) };
-        logf!("stt", "run: RoInitialize -> {hr:?}");
-        let hint = |x: windows::core::Error| {
-            // 0x80045509: speech privacy policy not accepted -> open the right Settings page for the user
-            if x.code().0 as u32 == 0x8004_5509 {
-                logf!("stt", "run: speech privacy not accepted, opening Settings > Privacy > Speech");
-                let _ = std::process::Command::new("cmd").args(["/C", "start", "", "ms-settings:privacy-speech"]).spawn();
-                "Turn on Online speech recognition (Settings opened)".to_string()
-            } else {
-                format!("{x} (Settings > Privacy > Speech > Online speech recognition must be on)")
-            }
-        };
-        logf!("stt", "run: creating the Windows speech recognizer");
-        let rec = SpeechRecognizer::new().map_err(|e| { logf!("stt", "run: SpeechRecognizer::new failed: {e:?}"); hint(e) })?;
-        logf!("stt", "run: recognizer created");
-        logf!("stt", "run: compiling constraints");
-        let comp = rec.CompileConstraintsAsync()
-            .map_err(|e| { logf!("stt", "run: CompileConstraintsAsync failed: {e:?}"); hint(e) })?
-            .get()
-            .map_err(|e| { logf!("stt", "run: constraint compilation failed: {e:?}"); hint(e) })?;
-        let status = comp.Status().map_err(|e| { logf!("stt", "run: reading the constraint status failed: {e:?}"); hint(e) })?;
-        logf!("stt", "run: constraint status {status:?}");
-        if status != SpeechRecognitionResultStatus::Success {
-            logf!("stt", "run: constraints are not usable, aborting");
-            return Err("Speech setup failed".into());
+    fn privacy_error(e: &windows::core::Error) -> bool { e.code().0 as u32 == 0x8004_5509 }
+
+    fn hint(e: &windows::core::Error) -> String {
+        if privacy_error(e) {
+            // 0x80045509: speech privacy policy not accepted -> open the right Settings page
+            let _ = std::process::Command::new("cmd").args(["/C", "start", "", "ms-settings:privacy-speech"]).spawn();
+            "Turn on Online speech recognition (Settings opened)".to_string()
+        } else {
+            format!("{e} (Settings > Privacy > Speech > Online speech recognition must be on)")
         }
-        rec.HypothesisGenerated(&TypedEventHandler::<SpeechRecognizer, HypArgs>::new(|_, a| {
-            match a.as_ref() {
-                Some(a) => match a.Hypothesis().and_then(|h| h.Text()) {
-                    Ok(t) => {
-                        let t = t.to_string();
-                        logf!("stt", "hypothesis: {t:?}");
-                        STATE.lock().unwrap().partial = t;
-                    }
-                    Err(e) => logf!("stt", "hypothesis text failed: {e:?}"),
-                },
-                None => logf!("stt", "hypothesis event without args"),
+    }
+
+    fn on_hypothesis(a: Option<&HypArgs>) -> windows::core::Result<()> {
+        let Some(a) = a else { logf!("stt", "hypothesis event without args"); return Ok(()) };
+        match a.Hypothesis().and_then(|h| h.Text()) {
+            Ok(t) => {
+                let t = t.to_string();
+                logf!("stt", "hypothesis: {t:?}");
+                let mut s = STATE.lock().unwrap();
+                if s.active { s.partial = t; }
             }
-            Ok(())
-        })).map_err(|e| { logf!("stt", "run: HypothesisGenerated hook failed: {e:?}"); hint(e) })?;
-        let sess = rec.ContinuousRecognitionSession().map_err(|e| { logf!("stt", "run: ContinuousRecognitionSession failed: {e:?}"); hint(e) })?;
-        logf!("stt", "run: continuous session created");
-        sess.ResultGenerated(&TypedEventHandler::<Session, ResArgs>::new(|_, a| {
-            let Some(a) = a.as_ref() else { logf!("stt", "result event without args"); return Ok(()) };
-            let Ok(r) = a.Result() else { logf!("stt", "result event without a result"); return Ok(()) };
-            let status = match r.Status() { Ok(s) => format!("{s:?}"), Err(e) => format!("<error {e:?}>") };
-            let confidence = match r.Confidence() { Ok(c) => format!("{c:?}"), Err(_) => "?".into() };
-            logf!("stt", "result: status={status} confidence={confidence}");
-            if r.Status().map(|s| s == SpeechRecognitionResultStatus::Success).unwrap_or(false) {
-                match r.Text() {
-                    Ok(t) => {
-                        let t = t.to_string();
-                        logf!("stt", "result text: {t:?}");
-                        if !t.trim().is_empty() {
-                            let out = format!("{} ", t.trim());
-                            let started = std::time::Instant::now();
-                            match type_text(&out) {
-                                Ok(n) => logf!("stt", "typed the phrase as {n} key events in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0),
-                                Err(e) => logf!("stt", "typing failed: {e}"),
-                            }
-                            let mut s = STATE.lock().unwrap();
-                            s.text.push_str(&out);
-                            s.partial.clear();
-                            logf!("stt", "transcript: {} chars total", s.text.len());
-                        } else {
-                            logf!("stt", "empty result text, nothing typed");
-                        }
-                    }
-                    Err(e) => logf!("stt", "result text read failed: {e:?}"),
-                }
-            }
-            Ok(())
-        })).map_err(|e| { logf!("stt", "run: ResultGenerated hook failed: {e:?}"); hint(e) })?;
-        logf!("stt", "run: starting the continuous session");
-        sess.StartAsync()
-            .map_err(|e| { logf!("stt", "run: StartAsync failed: {e:?}"); hint(e) })?
-            .get()
-            .map_err(|e| { logf!("stt", "run: session start failed: {e:?}"); hint(e) })?;
-        logf!("stt", "run: listening");
-        let _ = rx.recv();
-        logf!("stt", "run: stop signal received");
-        match sess.StopAsync().and_then(|a| a.get()) {
-            Ok(()) => logf!("stt", "run: session stopped"),
-            Err(e) => logf!("stt", "run: session stop failed: {e:?}"),
+            Err(e) => logf!("stt", "hypothesis text failed: {e:?}"),
         }
         Ok(())
+    }
+
+    fn on_result(a: Option<&ResArgs>) -> windows::core::Result<()> {
+        let Some(a) = a else { logf!("stt", "result event without args"); return Ok(()) };
+        let Ok(r) = a.Result() else { logf!("stt", "result event without a result"); return Ok(()) };
+        let status = match r.Status() { Ok(s) => format!("{s:?}"), Err(e) => format!("<error {e:?}>") };
+        let confidence = match r.Confidence() { Ok(c) => format!("{c:?}"), Err(_) => "?".into() };
+        logf!("stt", "result: status={status} confidence={confidence}");
+        if !r.Status().map(|s| s == SpeechRecognitionResultStatus::Success).unwrap_or(false) { return Ok(()); }
+        match r.Text() {
+            Ok(t) => {
+                let t = t.to_string();
+                logf!("stt", "result text: {t:?}");
+                if !t.trim().is_empty() {
+                    let out = format!("{} ", t.trim());
+                    let started = std::time::Instant::now();
+                    match type_text(&out) {
+                        Ok(n) => logf!("stt", "typed the phrase as {n} key events in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0),
+                        Err(e) => logf!("stt", "typing failed: {e}"),
+                    }
+                    let mut s = STATE.lock().unwrap();
+                    s.text.push_str(&out);
+                    s.partial.clear();
+                    logf!("stt", "transcript: {} chars total", s.text.len());
+                    drop(s);
+                    // a finished phrase can be the last thing a short hold produces
+                    emit("stt://state");
+                } else {
+                    logf!("stt", "empty result text, nothing typed");
+                }
+            }
+            Err(e) => logf!("stt", "result text read failed: {e:?}"),
+        }
+        Ok(())
+    }
+
+    /// Build the recognizer and compile a dictation grammar. Without a topic constraint the
+    /// continuous session starts but never matches free speech, which is why the old build logged
+    /// zero hypotheses and zero results.
+    fn build() -> windows::core::Result<Engine> {
+        let rec = SpeechRecognizer::new()?;
+        logf!("stt", "worker: recognizer created");
+        let constraints = rec.Constraints()?;
+        constraints.Clear()?;
+        let topic = SpeechRecognitionTopicConstraint::Create(SpeechRecognitionScenario::Dictation, &HSTRING::from("dictation"))?;
+        constraints.Append(&topic)?;
+        logf!("stt", "worker: dictation constraint added, compiling");
+        let comp = rec.CompileConstraintsAsync()?.get()?;
+        let status = comp.Status()?;
+        logf!("stt", "worker: constraint status {status:?}");
+        if status != SpeechRecognitionResultStatus::Success { return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL)); }
+        rec.HypothesisGenerated(&TypedEventHandler::<SpeechRecognizer, HypArgs>::new(|_, a| on_hypothesis(a.as_ref())))?;
+        let sess = rec.ContinuousRecognitionSession()?;
+        sess.ResultGenerated(&TypedEventHandler::<Session, ResArgs>::new(|_, a| on_result(a.as_ref())))?;
+        logf!("stt", "worker: recognizer ready (warm)");
+        Ok(Engine { _rec: rec, sess })
+    }
+
+    /// Stop the session without blocking forever. The old `.get()` could wait ~20 s; a hold release
+    /// kept the mic open the whole time. 500 ms is enough to flush the last phrase, then cancel.
+    fn stop_session(sess: &Session) -> bool {
+        let started = std::time::Instant::now();
+        let action = match sess.StopAsync() { Ok(a) => a, Err(e) => { logf!("stt", "worker: StopAsync failed: {e:?}"); return false; } };
+        loop {
+            match action.Status() {
+                Ok(AsyncStatus::Completed) => {
+                    if let Err(e) = action.GetResults() { logf!("stt", "worker: stop results failed: {e:?}"); }
+                    logf!("stt", "worker: stopped in {} ms", started.elapsed().as_millis());
+                    return true;
+                }
+                Ok(AsyncStatus::Canceled) => { logf!("stt", "worker: stop cancelled after {} ms", started.elapsed().as_millis()); return true; }
+                Ok(AsyncStatus::Error) => { logf!("stt", "worker: stop failed after {} ms", started.elapsed().as_millis()); return false; }
+                _ => {}
+            }
+            if started.elapsed() > Duration::from_millis(500) {
+                logf!("stt", "worker: stop took >500 ms, cancelling the session");
+                let _ = action.Cancel();
+                let _ = sess.CancelAsync();
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn fail(e: String) {
+        logf!("stt", "worker: {e}");
+        let mut s = STATE.lock().unwrap();
+        s.active = false;
+        s.partial.clear();
+        s.err = e;
+        drop(s);
+        emit("stt://state");
+    }
+
+    /// The single recognition thread: owns the recognizer and handles one command at a time.
+    pub fn worker(rx: Receiver<Cmd>) {
+        // this worker thread needs its own WinRT apartment before touching SpeechRecognizer
+        let hr = unsafe { windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED) };
+        logf!("stt", "worker: RoInitialize -> {hr:?}");
+        // Pre-warm quietly: if speech is not set up yet, wait for the first real press so the
+        // Settings popup only appears when the user actually asks for dictation.
+        let mut engine = match build() {
+            Ok(e) => Some(e),
+            Err(e) => { logf!("stt", "worker: pre-warm skipped: {e:?}"); None }
+        };
+        // A quick tap can send Start then Stop before the session ever runs. Stopping an idle
+        // session fails and used to drop the warm recognizer, so track the real state.
+        let mut listening = false;
+        loop {
+            match rx.recv() {
+                Ok(Cmd::Start) => {
+                    if !WANT.load(Ordering::Relaxed) { logf!("stt", "worker: queued start cancelled (shortcut already released)"); continue; }
+                    if listening { logf!("stt", "worker: start ignored, already listening"); continue; }
+                    if engine.is_none() {
+                        match build() {
+                            Ok(e) => engine = Some(e),
+                            Err(e) => { fail(hint(&e)); continue; }
+                        }
+                    }
+                    let Some(e) = engine.as_ref() else { continue };
+                    if !WANT.load(Ordering::Relaxed) { logf!("stt", "worker: start cancelled before listening"); continue; }
+                    logf!("stt", "worker: starting the continuous session");
+                    match e.sess.StartAsync().and_then(|a| a.get()) {
+                        Ok(()) => { listening = true; logf!("stt", "worker: listening"); emit("stt://state"); }
+                        Err(err) => { fail(hint(&err)); engine = None; }
+                    }
+                }
+                Ok(Cmd::Stop) => {
+                    if !listening { logf!("stt", "worker: stop with no session running"); continue; }
+                    let clean = match engine.as_ref() { Some(e) => stop_session(&e.sess), None => true };
+                    listening = false;
+                    if !clean {
+                        // a cancelled session is not reusable: rebuild it on the next press
+                        logf!("stt", "worker: dropping the recognizer after an unclean stop");
+                        engine = None;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
     }
 }
 
@@ -279,5 +367,5 @@ mod imp {
 mod imp {
     use super::*;
     pub fn type_out(_: &str) -> Result<usize, String> { Err("Typing needs Windows".into()) }
-    pub fn run(_: Receiver<()>) -> Result<(), String> { logf!("stt", "run: not on Windows"); Err("Dictation needs Windows".into()) }
+    pub fn worker(_: Receiver<Cmd>) { logf!("stt", "worker: not on Windows"); }
 }

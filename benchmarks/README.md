@@ -87,6 +87,7 @@ python .\local-stt.py <extracted-model-dir> phrase.wav
 | 2026-11-26 | Rows spoken by the text-to-speech self-test are marked by their timestamp (03:22) and take their `first_words_ms` from a pause before the voice starts; real presses read lower. |
 | 2026-11-26 | Live preview check (03:44): press → engine accepted **247 ms** → mic open **525 ms** → first interim `this is` **1.9 s**, then a new interim every **~0.9 s** (`this is a dictation benchmark`, `… test 123`), final **4.2 s**. The audio was played from a file, so ~1.4 s of that is the player's start-up before the first word reached the mic; the recognizer itself emits the first words 4 ms after it reports sound. |
 | 2026-11-26 | Offline candidate, same WAV through sherpa-onnx streaming zipformer (int8, 70 MB, 4 threads): first words **0.70 s** into the audio, a new partial every **0.3 s**, whole 3.8 s clip computed in **327 ms** (real-time factor **0.09**), transcript `THIS IS A DICTATION BENCH MARK TEST ONE TWO THREE`. Faster partials and no network, but uppercase with no punctuation and `benchmark` split in two, so the webview engine still wins on text quality. |
+| 2026-11-26 | WinRT fallback: the recognizer and its grammar are now built once at launch on a long-lived worker instead of on every press, and the worker survives a tap that starts and stops before the session runs. Boot log: worker thread up at **+0.557 s**, recognizer ready at **+1.064 s** (constraint compile **10 ms** when the recognizer is already cached), so the old **576.5 ms** median setup is gone from the press path. |
 
 ## Files
 
@@ -104,3 +105,4 @@ python .\local-stt.py <extracted-model-dir> phrase.wav
 |---|---|
 | 2026-11-26 | baseline: 8 ms Rust pointer loop + 60 Hz JS `get_ptr`/`set_hit_rect` polling, WinRT dictation, always-on stats/GPU samplers |
 | 2026-11-26 | push pointer events from Rust, no idle JS timers, streaming dictation in the webview |
+| 2026-11-26 | one long-lived WinRT worker (recognizer built at launch), state pushed to the island, island spawns at its edge |
