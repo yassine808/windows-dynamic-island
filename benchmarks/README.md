@@ -44,6 +44,7 @@ One row per press:
 | Column | Meaning |
 |---|---|
 | `engine` | `browser` = WebView2 streaming recognizer, `winrt` = Windows built-in recognizer |
+| `model` | what actually transcribed the audio, as logged by the app (`edge-speech-ceto`, `windows-speech-winrt`, …) |
 | `start_ms` | press → engine accepted the session (`listening` / `engine started`) |
 | `audio_ms` | press → microphone actually open (browser engine only) |
 | `first_words_ms` | press → first interim or final words on screen |
@@ -68,7 +69,9 @@ One row per press:
 | Date | Finding |
 |---|---|
 | 2026-11-26 | WinRT recognizer needs **857 ms median** (up to 1910 ms) before it listens, and produced 0 characters in 8 logged sessions: press-and-hold felt dead. |
-| 2026-11-26 | WebView2 streaming engine is ready in **12–139 ms** and opens the mic in **197–394 ms**, but the speech service is unreachable inside WebView2 (`network` error 359 ms into the session, endpoint `speech.platform.bing.com:443` is up), so it always falls back. |
+| 2026-11-26 | WebView2 streaming engine is ready in **18 ms median** and opens the mic in **218 ms**, but every session died with a `network` error 359 ms in: WebView2 sends speech to the Ceto service (`api.msedgeservices.com`), which answers 403 (Microsoft bug, still present in runtime 156+). |
+| 2026-11-26 | Fix: `--disable-features=…,msSpeechRecognitionServiceUseCetoService` in `additionalBrowserArgs` routes it to `speech.platform.bing.com` instead. Self-test spoken through the speakers: mic open 168 ms, first words 2.7 s after the press, final 4.9 s after the press, transcript `This is a dictation benchmark test 123.` — no fallback, no key, no quota. |
+| 2026-11-26 | Rows spoken by the text-to-speech self-test are marked by their timestamp (03:22) and take their `first_words_ms` from a pause before the voice starts; real presses read lower. |
 
 ## Files
 

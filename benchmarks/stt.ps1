@@ -15,10 +15,12 @@ $date = (Get-Item $Log).LastWriteTime.ToString("yyyy-MM-dd")
 
 $rows = @()
 $cur = $null
+# transcription model per engine; the app logs its own name, these are only for lines from older builds
+$models = @{ browser = "edge-speech-ceto"; winrt = "windows-speech-winrt" }
 
 function New-Session($ts, $engine, $t0) {
   [pscustomobject]@{
-    Ts = $ts; Engine = $engine; T0 = $t0
+    Ts = $ts; Engine = $engine; Model = $models[$engine]; T0 = $t0
     StartAt = $null; AudioAt = $null; FirstAt = $null; FinalAt = $null; TypeAt = $null
     TypeMs = 0.0; Chars = 0; Finals = 0; Sample = ""
   }
@@ -33,6 +35,7 @@ $flush = {
       timestamp      = $cur.Ts
       date           = $script:date
       engine         = $cur.Engine
+      model          = $cur.Model
       start_ms       = & $ms $cur.StartAt
       audio_ms       = & $ms $cur.AudioAt
       first_words_ms = & $ms $cur.FirstAt
@@ -61,12 +64,13 @@ foreach ($ln in Get-Content $Log) {
   # a press opens a session; whatever the previous session got is closed as it stands
   if ($body -like "start: browser engine listening") { & $flush; $cur = New-Session $ts "browser" $off; continue }
   if ($body -like "start: spawning the recognition worker*") { & $flush; $cur = New-Session $ts "winrt" $off; continue }
+  if ($body -match '^engine -> (browser|winrt).*model=(\S+)$') { $models[$Matches[1]] = $Matches[2]; continue }
   if ($null -eq $cur) { continue }
 
   if ($body -match '^engine started(?: in \d+ ms)?$') { $cur.StartAt = $off }
   elseif ($body -eq "audio capture open") { $cur.AudioAt = $off }
   elseif ($body -eq "first words") { if ($null -eq $cur.FirstAt) { $cur.FirstAt = $off } }
-  elseif ($body -match '^interim "(.*)"$') { if ($null -eq $cur.FirstAt) { $cur.FirstAt = $off }; $cur.Sample = $Matches[1] }
+  elseif ($body -match '^interim "(.*)"$') { if ($null -eq $cur.FirstAt) { $cur.FirstAt = $off }; if ($Matches[1]) { $cur.Sample = $Matches[1] } }
   elseif ($body -match '^final "(.*)"$') {
     if ($null -eq $cur.FirstAt) { $cur.FirstAt = $off }
     $cur.FinalAt = $off; $cur.Finals++; $cur.Sample = $Matches[1]; $cur.Chars += $Matches[1].Length
@@ -104,7 +108,7 @@ $rows | Select-Object -Last $Last | Format-Table -AutoSize
 
 foreach ($g in $rows | Group-Object engine) {
   $r = $g.Group
-  "--- {0}: {1} sessions, {2} typed characters ---" -f $g.Name, $r.Count, (($r.chars | Measure-Object -Sum).Sum)
+  "--- {0} [{3}]: {1} sessions, {2} typed characters ---" -f $g.Name, $r.Count, (($r.chars | Measure-Object -Sum).Sum), (($r.model | Select-Object -Unique) -join ' / ')
   "  engine ready   median {0} ms" -f (Median $r.start_ms)
   "  mic open       median {0} ms" -f (Median $r.audio_ms)
   "  first words    median {0} ms" -f (Median $r.first_words_ms)

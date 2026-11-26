@@ -30,7 +30,9 @@ fn emit(ev: &str) { if let Some(a) = APP.get() { let _ = a.emit(ev, ()); } }
 #[tauri::command]
 pub fn stt_engine(browser: bool) {
     BROWSER.store(browser, Ordering::Relaxed);
-    logf!("stt", "engine -> {}", if browser { "browser (streaming, no key)" } else { "winrt" });
+    // the model name lands in benchmarks/stt-latency.csv, so each row records what transcribed it
+    let model = if browser { "edge-speech-ceto" } else { "windows-speech-winrt" };
+    logf!("stt", "engine -> {} model={}", if browser { "browser (streaming, no key)" } else { "winrt" }, model);
 }
 
 /// The browser engine ended on its own (error, long silence): keep the Rust state honest.

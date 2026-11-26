@@ -24,7 +24,8 @@
         "resizable": false,
         "shadow": false,
         "focus": false,
-        "focusable": false
+        "focusable": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,msSpeechRecognitionServiceUseCetoService"
       }
     ],
     "security": { "csp": null }

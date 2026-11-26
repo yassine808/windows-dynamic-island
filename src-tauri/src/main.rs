@@ -131,6 +131,8 @@ fn main() {
     tauri::Builder::default()
         // The streaming recognizer lives in the webview and needs the microphone. Without this hook
         // WebView2 denies the request and dictation silently falls back to the slow Windows engine.
+        // The recognizer also needs tauri.conf.json's browser flag that turns off the Ceto speech
+        // service: that endpoint answers 403 inside WebView2, which surfaces as a "network" error.
         .on_permission_request(|_webview, kind| match kind {
             tauri::webview::PermissionKind::Microphone => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
