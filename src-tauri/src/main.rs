@@ -13,7 +13,7 @@ mod stats;
 mod stt;
 mod tools;
 
-use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
+use std::{sync::{Arc, Mutex}, thread, time::Duration};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, State};
 use tauri_plugin_global_shortcut::ShortcutState;
 
@@ -179,6 +179,8 @@ fn main() {
 
             // Window stays fully click-through. Rust reads the mouse and forwards it to the UI.
             let hwnd = win.hwnd()?.0 as isize;
+            // The overlay never moves after setup, so cache its top-left for cursor math.
+            let (ox, oy) = (minx as f64, miny as f64);
             tools::OVERLAY.store(hwnd, std::sync::atomic::Ordering::Relaxed);
             let winc = win.clone();
             logf!("win", "mouse thread starting, hwnd={hwnd} scale={scale}");
@@ -208,7 +210,7 @@ fn main() {
                         }
                     }
                     if hidden { continue; }
-                    let Some((px, py)) = cursor_rel(hwnd) else { continue };
+                    let Some((px, py)) = cursor_at(ox, oy) else { continue };
                     let (x, y) = (px / scale, py / scale);
                     let (r, dragging) = { let g = shared.lock().unwrap(); (g.r, g.dragging) };
                     let pad = 10.0;
