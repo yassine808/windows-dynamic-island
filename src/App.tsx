@@ -945,9 +945,14 @@ export default function App() {
     if (!TAURI) return;
     let active = false, btn: HTMLElement | null = null, sk: DOMRect | null = null, skId: string | undefined;
     let held = false; // the dictation mic is being held down in Hold mode
+    let hand = false; // last cursor shape we pushed to the OS
     const frac = (p: P) => (sk ? (p.x - sk.left) / sk.width : 0);
     const onPtr = (p: P) => {
       if (!d.current?.on) setHover(p.inside);
+      // Keep the OS cursor honest even when WebView2 misses the element change: hand only over a
+      // button or a seek bar, arrow everywhere else.
+      const overHand = !!document.elementFromPoint(p.x, p.y)?.closest("button, .seek:not(.off)");
+      if (overHand !== hand) { hand = overHand; invoke("set_cursor", { hand }).catch(() => {}); }
       const f = fn.current;
       if (p.down && !active) {
         if (!p.inside) return;
@@ -985,23 +990,49 @@ export default function App() {
     return () => { gone = true; un?.(); };
   }, []);
 
-  // all monitors (the overlay spans them), primary first
+  // all monitors (the overlay spans them), primary first. Rust re-sends this list whenever Windows
+  // changes the display layout (resolution switch, Parsec / remote display), so the island follows
+  // the desktop instead of staying at the old monitor's coordinates.
   useEffect(() => {
     if (!TAURI) return;
-    invoke<number[][]>("get_monitors").then((l) => {
-      if (l.length) {
-        mons.current = l.map(([x, y, w, h]) => ({ x, y, w, h }));
-        monRef.current = mons.current[0];
-        along.current = mons.current[0].x + mons.current[0].w / 2;
+    let seeded = false;
+    let un: (() => void) | undefined, gone = false;
+    const apply = (l: number[][], initial: boolean) => {
+      if (!l.length) return;
+      const next = l.map(([x, y, w, h]) => ({ x, y, w, h }));
+      const prev = monRef.current;
+      mons.current = next;
+      // keep the island on the monitor it was on if that monitor survived, otherwise the primary
+      const near = (q: Rect) => Math.hypot(q.x + q.w / 2 - (prev.x + prev.w / 2), q.y + q.h / 2 - (prev.y + prev.h / 2));
+      const keep = next.find((q) => q.x === prev.x && q.y === prev.y) ?? next.reduce((a, q) => (near(q) < near(a) ? q : a));
+      monRef.current = keep;
+      const horiz = edgeRef.current === "top" || edgeRef.current === "bottom";
+      if (initial) {
+        along.current = keep.x + keep.w / 2;
         // Snap to the edge before the first visible frame: the target position does not depend on
         // the pill's size while it is un-tucked, so growing from 2 px never slides sideways.
-        const t = target(edgeRef.current, along.current, { w: 1, h: 1 }, false, monRef.current);
+        const t = target(edgeRef.current, along.current, { w: 1, h: 1 }, false, keep);
         ex.set(t.ex); ey.set(t.ey); fx.set(t.fx); fy.set(t.fy);
-        dbg(`spawn: seeded at ${Math.round(t.ex)},${Math.round(t.ey)} on ${Math.round(monRef.current.w)}x${Math.round(monRef.current.h)}`);
+        dbg(`spawn: seeded at ${Math.round(t.ex)},${Math.round(t.ey)} on ${Math.round(keep.w)}x${Math.round(keep.h)}`);
+      } else {
+        // same relative spot along the edge, rescaled to the monitor's new size
+        const span = horiz ? prev.w : prev.h;
+        const f = span > 0 ? clamp01((along.current - (horiz ? prev.x : prev.y)) / span) : 0.5;
+        along.current = (horiz ? keep.x : keep.y) + f * (horiz ? keep.w : keep.h);
+        dbg(`display change: island moved to ${Math.round(keep.x)},${Math.round(keep.y)} ${Math.round(keep.w)}x${Math.round(keep.h)}`);
       }
-      setPlaced(true);
       setNonce((n) => n + 1);
-    }).catch(() => setPlaced(true));
+    };
+    const onMons = (l: number[][]) => {
+      if (!l.length) return;
+      if (!seeded) { apply(l, true); seeded = true; setPlaced(true); }
+      else apply(l, false);
+    };
+    listen<number[][]>("mons", (e) => onMons(e.payload))
+      .then((f) => { if (gone) f(); else un = f; })
+      .catch((err) => dbg("mons listener failed: " + String(err)));
+    invoke<number[][]>("get_monitors").then(onMons).catch(() => setPlaced(true));
+    return () => { gone = true; un?.(); };
   }, []);
 
   const control = (action: string) => {

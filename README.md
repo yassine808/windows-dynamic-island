@@ -50,6 +50,8 @@ so both files stay small and the app keeps logging.
 - Drag the island: it flicks and snaps to the nearest screen edge. Near the middle of the screen it
   sticks to the center (like Word's guides) until you pull away. On left/right/bottom it turns
   vertical and tucks away when idle.
+- Changing the resolution or connecting a Parsec / remote display moves the overlay with the desktop,
+  so the island stays on its edge instead of staying at the old screen's coordinates.
 - Scroll the mouse wheel over the island to switch pages; a long scroll keeps going to the last page.
 - Dictation shortcut defaults to `Ctrl+Alt+Space`. On the Dictation page, click the shortcut chip and
   press any key or any mouse button (bare keys work; left click is never recorded). The island takes

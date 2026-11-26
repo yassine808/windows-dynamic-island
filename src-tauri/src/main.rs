@@ -43,8 +43,8 @@ fn lbutton() -> bool {
 #[cfg(not(windows))]
 fn lbutton() -> bool { false }
 
-// Cursor position relative to the overlay's top-left, in physical px. The window never moves, so the
-// origin is cached once instead of asking the window manager on every tick.
+// Cursor position relative to the overlay's top-left, in physical px. The origin is cached and only
+// refreshed when the display layout changes, instead of asking the window manager on every tick.
 #[cfg(windows)]
 fn cursor_at(ox: f64, oy: f64) -> Option<(f64, f64)> {
     use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
@@ -138,6 +138,26 @@ fn already_running() -> bool {
 #[cfg(not(windows))]
 fn already_running() -> bool { false }
 
+/// Union of every monitor in physical px, plus the same list in the webview's CSS px (primary
+/// first). Recomputed on a timer so a resolution switch or a Parsec / remote display changes the
+/// overlay with the desktop instead of leaving it at the old size and position.
+fn layout_of(win: &tauri::WebviewWindow) -> tauri::Result<(i32, i32, u32, u32, f64, Vec<[f64; 4]>)> {
+    let mons = win.available_monitors()?;
+    let prim = win.primary_monitor()?.map(|m| (m.position().x, m.position().y));
+    let minx = mons.iter().map(|m| m.position().x).min().unwrap_or(0);
+    let miny = mons.iter().map(|m| m.position().y).min().unwrap_or(0);
+    let maxx = mons.iter().map(|m| m.position().x + m.size().width as i32).max().unwrap_or(1920);
+    let maxy = mons.iter().map(|m| m.position().y + m.size().height as i32).max().unwrap_or(1080);
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let mut list: Vec<([f64; 4], bool)> = mons.iter().map(|m| (
+        [(m.position().x - minx) as f64 / scale, (m.position().y - miny) as f64 / scale,
+         m.size().width as f64 / scale, m.size().height as f64 / scale],
+        Some((m.position().x, m.position().y)) == prim,
+    )).collect();
+    list.sort_by_key(|(_, p)| !*p);
+    Ok((minx, miny, (maxx - minx) as u32, (maxy - miny) as u32, scale, list.into_iter().map(|(r, _)| r).collect()))
+}
+
 #[tauri::command]
 fn set_hit_rect(st: State<Shared>, x: f64, y: f64, w: f64, h: f64) { st.lock().unwrap().r = [x, y, w, h]; }
 
@@ -155,6 +175,21 @@ fn log(msg: String) { logf!("js", "{msg}"); }
 
 #[tauri::command]
 fn set_dragging(st: State<Shared>, on: bool) { st.lock().unwrap().dragging = on; }
+
+/// The webview decides which element is under the pointer; the OS cursor is set here so it cannot
+/// stick on the hand after leaving a button (WebView2 sometimes misses WM_SETCURSOR on a
+/// transparent, click-through overlay window).
+#[tauri::command]
+fn set_cursor(hand: bool) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_ARROW, IDC_HAND};
+        let id = if hand { IDC_HAND } else { IDC_ARROW };
+        if let Ok(c) = LoadCursorW(None, id) { SetCursor(c); }
+    }
+    #[cfg(not(windows))]
+    let _ = hand;
+}
 
 fn main() {
     paths::migrate();
@@ -180,7 +215,7 @@ fn main() {
         })
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
-            media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_dragging, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
+            media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_dragging, set_cursor, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
             stt::stt_engine, stt::stt_ended, stt::stt_type,
             hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::record_submit, hotkey::cancel_record_shortcut, hotkey::reset_shortcut,
 autostart::autostart_get, autostart::autostart_set,
@@ -198,35 +233,30 @@ autostart::autostart_get, autostart::autostart_set,
             logf!("win", "setup: starting stats");
             stats::start();
 
-            // Transparent overlay over the whole primary monitor; the island lives inside it.
+            // Transparent overlay over the whole desktop; the island lives inside it. The layout is
+            // re-read on a timer below, because a resolution switch or a Parsec / remote display
+            // changes the monitor union while the app is running.
             let win = app.get_webview_window("main").unwrap();
-            // One transparent overlay spanning every monitor.
-            let mons = win.available_monitors()?;
-            for m in &mons {
-                logf!("win", "monitor {}x{} at {},{} scale {:.2}", m.size().width, m.size().height, m.position().x, m.position().y, m.scale_factor());
+            let (minx, miny, ow, oh, scale, list) = layout_of(&win)?;
+            for m in &list {
+                logf!("win", "monitor {}x{} at {},{}", m[2], m[3], m[0], m[1]);
             }
-            let prim = win.primary_monitor()?.map(|m| (m.position().x, m.position().y));
-            let minx = mons.iter().map(|m| m.position().x).min().unwrap_or(0);
-            let miny = mons.iter().map(|m| m.position().y).min().unwrap_or(0);
-            let maxx = mons.iter().map(|m| m.position().x + m.size().width as i32).max().unwrap_or(1920);
-            let maxy = mons.iter().map(|m| m.position().y + m.size().height as i32).max().unwrap_or(1080);
             win.set_position(PhysicalPosition::new(minx, miny))?;
-            win.set_size(PhysicalSize::new((maxx - minx) as u32, (maxy - miny) as u32))?;
-            let scale = win.scale_factor().unwrap_or(1.0);
-            logf!("win", "overlay {}x{} at {},{} (scale {:.2}, primary {prim:?})", maxx - minx, maxy - miny, minx, miny, scale);
-            let mut list: Vec<([f64; 4], bool)> = mons.iter().map(|m| (
-                [(m.position().x - minx) as f64 / scale, (m.position().y - miny) as f64 / scale, m.size().width as f64 / scale, m.size().height as f64 / scale],
-                Some((m.position().x, m.position().y)) == prim,
-            )).collect();
-            list.sort_by_key(|(_, p)| !*p);
-            shared.lock().unwrap().mons = list.into_iter().map(|(r, _)| r).collect();
+            win.set_size(PhysicalSize::new(ow, oh))?;
+            logf!("win", "overlay {ow}x{oh} at {minx},{miny} (scale {scale:.2})");
+            shared.lock().unwrap().mons = list.clone();
             win.set_ignore_cursor_events(true)?;
 
             // Window stays fully click-through. Rust reads the mouse and pushes every change to the UI;
             // the old 16 ms JS poll missed fast clicks and kept a 60 Hz timer alive for nothing.
             let hwnd = win.hwnd()?.0 as isize;
-            // The overlay never moves after setup, so cache its top-left for cursor math.
-            let (ox, oy) = (minx as f64, miny as f64);
+            // The overlay origin is refreshed with the monitor layout; cache it for cursor math.
+            let mut ox = minx as f64;
+            let mut oy = miny as f64;
+            let mut scale = scale;
+            let mut css = list;
+            let mut geo = (minx, miny, ow, oh, scale);
+            let mut next_layout = Instant::now() + Duration::from_secs(2);
             OVERLAY.store(hwnd, Ordering::Relaxed);
             let winc = win.clone();
             let app = app.handle().clone();
@@ -247,6 +277,27 @@ autostart::autostart_get, autostart::autostart_set,
                     thread::sleep(Duration::from_millis(ms));
                     ticks += 1;
                     let now = Instant::now();
+                    // Windows can change the monitor union under us: a resolution switch, or a
+                    // Parsec / remote display connecting or disconnecting. Re-read it and move the
+                    // overlay with the desktop; the UI gets the new monitor list and re-places the
+                    // island, so it never stays at the old screen's coordinates.
+                    if now >= next_layout {
+                        next_layout = now + Duration::from_secs(2);
+                        if let Ok((nx, ny, nw, nh, ns, nl)) = layout_of(&winc) {
+                            if (nx, ny, nw, nh, ns) != geo || nl != css {
+                                let _ = winc.set_position(PhysicalPosition::new(nx, ny));
+                                let _ = winc.set_size(PhysicalSize::new(nw, nh));
+                                geo = (nx, ny, nw, nh, ns);
+                                ox = nx as f64;
+                                oy = ny as f64;
+                                scale = ns;
+                                css = nl.clone();
+                                shared.lock().unwrap().mons = nl.clone();
+                                let _ = app.emit("mons", nl);
+                                logf!("win", "display change: overlay {nw}x{nh} at {nx},{ny} scale {ns:.2}");
+                            }
+                        }
+                    }
                     if now >= next_fs { fs = fullscreen_app(hwnd); next_fs = now + Duration::from_millis(250); }
                     let cur = cursor_visible();
                     // fullscreen game in front AND its cursor is hidden (mouse-look gameplay): island stays visible
