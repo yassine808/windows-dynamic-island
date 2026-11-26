@@ -354,9 +354,10 @@ export default function App() {
     s.lx = cx; s.ly = cy; s.lt = now;
     // magnetic center (like Word's guides): near the middle of the screen the island sticks there until you pull away
     let tx = cx - s.gx, ty = cy - s.gy;
-    const iw = w.get(), ih = h.get(), icx = tx + iw / 2, icy = ty + ih / 2;
-    const m = monAt(icx, icy), e = edgeAt(m, icx, icy), hz = e === "top" || e === "bottom";
-    const mid = hz ? m.x + m.w / 2 : m.y + m.h / 2, off = Math.abs((hz ? icx : icy) - mid);
+    // (judged by the cursor: while dragging the island is the big expanded card, its own center is not where you aim)
+    const iw = w.get(), ih = h.get();
+    const m = monAt(cx, cy), e = edgeAt(m, cx, cy), hz = e === "top" || e === "bottom";
+    const mid = hz ? m.x + m.w / 2 : m.y + m.h / 2, off = Math.abs((hz ? cx : cy) - mid);
     if (s.hz !== hz) s.lock = false;
     s.hz = hz; s.mid = mid;
     if (!s.lock && off < 14) s.lock = true; else if (s.lock && off > 34) s.lock = false;
@@ -368,13 +369,14 @@ export default function App() {
     d.current = null;
     if (!s?.on) return;
     call("set_dragging", { on: false });
-    const cx = ex.get() + w.get() / 2, cy = ey.get() + h.get() / 2;
+    const cx = s.lx, cy = s.ly; // last cursor position
     const px = cx + s.vx * 0.15, py = cy + s.vy * 0.15;
     const m = monAt(cx, cy);
     monRef.current = m;
     const e = edgeAt(m, px, py), hz = e === "top" || e === "bottom";
     let a = hz ? px : py;
     if (s.lock && s.hz === hz) a = s.mid; // stuck to the center: stay exactly there
+    along.current = a;
     setEdge(e); setDragging(false); setNonce((n) => n + 1);
   };
   const fn = useRef({ pdown, pmove, pup });

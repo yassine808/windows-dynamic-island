@@ -13,7 +13,8 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 
 .shell { position: absolute; left: 0; top: 0; touch-action: none; }
 .stage, .stage * { cursor: default; }
-.stage button, .stage button *, .stage .seek:not(.off), .stage .seek:not(.off) * { cursor: pointer; }
+/* hand cursor only on the transport buttons and the seek bar; grabbing while dragging */
+.stage .controls button, .stage .controls button *, .stage .seek:not(.off), .stage .seek:not(.off) * { cursor: pointer; }
 .stage.dragging, .stage.dragging * { cursor: grabbing; }
 .island { position: absolute; inset: 0; background: #000; overflow: hidden; transition: box-shadow 0.3s; }
 .stage.dragging .island { box-shadow: 0 22px 50px rgba(0, 0, 0, 0.5); }
