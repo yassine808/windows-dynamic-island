@@ -601,17 +601,18 @@ export default function App() {
   useMic(stt.active, level);
 
   const vertical = edge === "left" || edge === "right";
-  // Only a true fullscreen-exclusive D3D app owns the display and hides the island completely. A
-  // windowed / borderless fullscreen app (a game that hides the cursor while playing included) keeps
-  // the island visible over it; otherwise it could never be reached at all. Its input is still paused
-  // in Rust while the app captures the mouse.
+  // With the fullscreen setting on, a true fullscreen-exclusive D3D app hides the island completely.
+  // A windowed / borderless fullscreen app (a game that hides the cursor while playing included)
+  // only tucks it into its edge: out of the way, but never gone, so it can always be reached. Its
+  // input is still paused in Rust while the app captures the mouse.
   // An alarm always stays visible: it has to be reachable to press Stop, even over a fullscreen app.
   const fsHide = hideFs && fsApp === "full" && !pin && !tm.done;
+  const fsTuck = hideFs && fsApp === "windowed" && !pin && !tm.done;
   useEffect(() => {
     if (!TAURI) return;
-    const why = fsHide ? "island hidden" : pin && fsApp !== "none" ? "settings pinned" : tm.done && fsApp !== "none" ? "alarm visible" : "island visible";
+    const why = fsHide ? "island hidden" : fsTuck ? "island tucked" : pin && fsApp !== "none" ? "settings pinned" : tm.done && fsApp !== "none" ? "alarm visible" : "island visible";
     dbg(`fullscreen: ${fsApp} (${why})`);
-  }, [fsApp, fsHide, pin, tm.done]);
+  }, [fsApp, fsHide, fsTuck, pin, tm.done]);
   // The alarm must stay visible until Stop is pressed, so hovering does not open another page over it.
   const expanded = (hover || pin) && !dragging && !tm.done;
   // Hovering while dictating expands the full report; away from it, the compact island shows the words.
@@ -828,11 +829,13 @@ export default function App() {
     // A fullscreen-exclusive app owns the display: hide completely instead of tucking, unless the
     // tray icon explicitly asked for Settings.
     if (fsHide) return;
-    const can = edge === "top" || edge === "bottom" ? hideUD : hideLR;
+    // A windowed / borderless fullscreen app tucks the island even when this edge's own auto-hide is
+    // off: the fullscreen setting is what asks for it, and a sliver stays reachable.
+    const can = fsTuck || (edge === "top" || edge === "bottom" ? hideUD : hideLR);
     if (!can || hover || pin || dragging || stt.active || tm.done) return;
-    const id = setTimeout(() => setTucked(true), 2500);
+    const id = setTimeout(() => setTucked(true), fsTuck ? 1200 : 2500);
     return () => clearTimeout(id);
-  }, [edge, hover, pin, dragging, stt.active, nonce, hideUD, hideLR, fsHide, tm.done]);
+  }, [edge, hover, pin, dragging, stt.active, nonce, hideUD, hideLR, fsHide, fsTuck, tm.done]);
 
   // report hit rect so Rust can toggle click-through; driven by the springs themselves, so an idle
   // island costs nothing instead of running a 60 Hz timer
@@ -1240,7 +1243,7 @@ export default function App() {
                     </div>
                   </div>
                   <div className="cfg">
-                    <span className="hint" title="Hide the island while a fullscreen-exclusive app owns the display; a windowed / borderless fullscreen app leaves it visible">Fullscreen window / app</span>
+                    <span className="hint" title="With this on, a windowed / borderless fullscreen app tucks the island into its edge and a fullscreen-exclusive app hides it completely">Fullscreen window / app</span>
                     <div className="seg" role="group" aria-label="Hide while a fullscreen window or app is in front">
                       <button className={hideFs ? "" : "on"} onClick={() => setHideFsPref(false)}>Off</button>
                       <button className={hideFs ? "on" : ""} onClick={() => setHideFsPref(true)}>On</button>

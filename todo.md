@@ -131,6 +131,13 @@
       the app captures the mouse) instead of hiding it completely, so it can always be reached
 - [x] Typecheck, frontend build, design checks, Rust check + tests, installer, install, commit, push
 
+## Round 8 (done)
+
+- [x] Fullscreen setting with a windowed / borderless fullscreen app: the island tucks into its edge
+      instead of staying fully open, even when that edge's own auto-hide is off. It is never 100%
+      hidden, and hovering the sliver brings it back
+- [x] Typecheck, frontend build, design checks, Rust check + tests, installer, install, commit, push
+
 ## Requests, as written (round 5)
 
 - [x] fix the issue, when i change resolution or connect to parsec, it doesnt show where it needs to be
@@ -152,6 +159,12 @@
 ## Requests, as written (round 7)
 
 - [x] it doesnt at all show when i have an app opened as windowed fullscreen, fix bug
+
+## Requests, as written (round 8)
+
+- [x] what i want, if the setting is on. the behavoiur should be the following. when im using the
+      windowsFS app, the island shouldnt be 100% hidden, even if cursor is visible in the app
+- [x] is still doesnt work. i have auto hide on wFS, yet it shows fully
 
 ## Notes
 

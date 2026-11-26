@@ -84,9 +84,9 @@ so both files stay small and the app keeps logging.
 
 Media, Dictation, Timer, Mixer, Stats, Settings.
 
-- **Settings**: auto-hide per axis (up/down, left/right), hide while a **fullscreen window / app**
-  owns the display (a normal maximized window does not count; a windowed / borderless fullscreen app,
-  even a game that hides the cursor, leaves the island visible), lock position, and Start with Windows.
+- **Settings**: auto-hide per axis (up/down, left/right), fullscreen behavior (with it on, a windowed
+  / borderless fullscreen app tucks the island into its edge, and a fullscreen-exclusive app hides it
+  completely; a normal maximized window does not count), lock position, and Start with Windows.
 - **Mixer**: speaker and mic volume sliders with mute buttons (default devices).
 - **Stats**: CPU, RAM, network, and GPU (NVIDIA only, needs `nvidia-smi`; shows n/a otherwise).
 
