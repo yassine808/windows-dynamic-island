@@ -15,6 +15,8 @@
 - [x] CI: typecheck, frontend build, Rust check + tests, Apple-design check, secret scan
 - [x] Screenshots of the island only in README.md (`docs/`)
 - [x] Make the repository public
+- [x] CI green on GitHub: Web (typecheck, build, design), Rust (check, tests), Secret scan
+- [x] Release `v0.1.0` with `IslandWin_0.1.0_x64-setup.exe`
 - [x] setup.exe built and tested: silent install writes the autostart Run entry, the app starts and
       logs `[autostart] on`, silent uninstall removes it and keeps settings + log in `%APPDATA%`
 - [x] Autostart registry round-trip test (opt-in, restores the previous value)
