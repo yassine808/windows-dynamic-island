@@ -13,10 +13,13 @@
 - [x] Installer: setup.exe (NSIS) with autostart on by default, data kept on upgrade/uninstall
 - [x] Log writer never panics when its console disappears
 - [x] CI: typecheck, frontend build, Rust check + tests, Apple-design check, secret scan
-- [ ] Screenshots of the island only in README.md
-- [ ] Make the repository public
-- [ ] Final verification: CI green on GitHub, setup.exe built, record button assigns a shortcut,
-      settings survive a restart
+- [x] Screenshots of the island only in README.md (`docs/`)
+- [x] Make the repository public
+- [x] setup.exe built and tested: silent install writes the autostart Run entry, the app starts and
+      logs `[autostart] on`, silent uninstall removes it and keeps settings + log in `%APPDATA%`
+- [x] Autostart registry round-trip test (opt-in, restores the previous value)
+- [ ] Record chip: press it once on the unlocked desktop to confirm a new combo is stored (the hook
+      path already captured a real Escape in the log; synthetic input cannot cross a locked desktop)
 
 ## Notes
 

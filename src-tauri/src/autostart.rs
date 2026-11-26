@@ -60,7 +60,9 @@ mod imp {
             if r != ERROR_SUCCESS { return None; }
             let n = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
             let s = String::from_utf16_lossy(&buf[..n]);
-            (!s.is_empty()).then_some(s)
+            // the Run value is stored quoted so paths with spaces run as one argument
+            let s = s.trim_matches('"');
+            (!s.is_empty()).then(|| s.to_string())
         }
     }
 
@@ -102,4 +104,28 @@ mod imp {
     pub fn write(_: &str) -> Result<(), String> { Err("Needs Windows".into()) }
     pub fn delete() -> Result<(), String> { Err("Needs Windows".into()) }
     pub fn set(_: bool) -> Result<(), String> { Err("Needs Windows".into()) }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    // Exercises the real HKCU Run value. Opt in locally with ISLANDWIN_E2E=1 (CI has no desktop,
+    // and the test must not leave an autostart behind on a shared machine either).
+    #[test]
+    fn autostart_round_trip() {
+        if std::env::var_os("ISLANDWIN_E2E").is_none() {
+            eprintln!("skipped: set ISLANDWIN_E2E=1 to touch the real Run key");
+            return;
+        }
+        let saved = super::imp::get();
+        let before = super::imp::enabled();
+        super::imp::set(false).unwrap();
+        assert!(!super::imp::enabled());
+        super::imp::set(true).unwrap();
+        assert_eq!(super::imp::get(), Some(super::imp::current_exe()));
+        match saved {
+            Some(v) => super::imp::write(&v).unwrap(),
+            None => super::imp::set(false).unwrap(),
+        }
+        assert_eq!(super::imp::enabled(), before);
+    }
 }

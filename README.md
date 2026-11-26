@@ -84,8 +84,8 @@ CI runs on every push and pull request:
 - `node scripts/design-check.mjs` — the Apple-style guardrails: one color palette, one type scale,
   the two house easing curves, reduced-motion support, no emoji, WCAG AA contrast for the text.
 - `cargo check --all-targets`, `cargo test` — the Rust side, including the shortcut recorder's key
-  names and combo rules. The synthetic-key end-to-end test is opt-in locally with
-  `ISLANDWIN_E2E=1 cargo test`.
+  names and combo rules, and the autostart round trip. Two end-to-end tests touch the real desktop and
+  the real Run key, so they are opt-in locally with `ISLANDWIN_E2E=1 cargo test`.
 - `node scripts/secret-scan.mjs` — no tokens, private keys or secret files in tracked files.
 
 Dictation latency and CPU/RAM measurements, and how to reproduce them, are in
