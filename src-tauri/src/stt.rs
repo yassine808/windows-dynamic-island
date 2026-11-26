@@ -1,6 +1,11 @@
 // Real-time dictation: Windows speech recognition (WinRT), typed into the focused field with SendInput. No clipboard.
 use serde::Serialize;
-use std::sync::{atomic::{AtomicBool, Ordering}, mpsc::{channel, Receiver, Sender}, Mutex};
+use std::{
+    sync::{atomic::{AtomicBool, Ordering}, mpsc::{channel, Receiver, Sender}, Mutex, OnceLock},
+    thread,
+    time::Duration,
+};
+use tauri::Emitter;
 
 #[derive(Serialize, Clone, Default)]
 pub struct SttState { pub active: bool, pub partial: String, pub text: String, pub err: String }
@@ -10,6 +15,41 @@ static STOP: Mutex<Option<Sender<()>>> = Mutex::new(None);
 /// true = push-to-talk (listen while the shortcut is held), false = press once to start, again to stop
 pub static HOLD: AtomicBool = AtomicBool::new(false);
 pub fn hold() -> bool { HOLD.load(Ordering::Relaxed) }
+
+/// The webview can run the browser's streaming recognizer instead of WinRT: then start/stop only
+/// flip this state and notify the UI, which does the actual listening.
+static BROWSER: AtomicBool = AtomicBool::new(false);
+/// What the user asked for last. Hold mode presses can land while a session is still closing.
+static WANT: AtomicBool = AtomicBool::new(false);
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+pub fn bind(app: tauri::AppHandle) { let _ = APP.set(app); }
+fn emit(ev: &str) { if let Some(a) = APP.get() { let _ = a.emit(ev, ()); } }
+
+/// Called by the UI once it has detected the browser speech engine.
+#[tauri::command]
+pub fn stt_engine(browser: bool) {
+    BROWSER.store(browser, Ordering::Relaxed);
+    logf!("stt", "engine -> {}", if browser { "browser (streaming, no key)" } else { "winrt" });
+}
+
+/// The browser engine ended on its own (error, long silence): keep the Rust state honest.
+#[tauri::command]
+pub fn stt_ended() {
+    let mut s = STATE.lock().unwrap();
+    s.active = false;
+    s.partial.clear();
+    drop(s);
+    logf!("stt", "browser engine reported the session ended");
+}
+
+/// Type a finished phrase into the focused window (same SendInput path the WinRT engine uses).
+#[tauri::command]
+pub fn stt_type(text: String) -> Result<usize, String> {
+    let out = if text.ends_with(' ') { text } else { format!("{text} ") };
+    logf!("stt", "type: {} chars from the browser engine", out.chars().count());
+    imp::type_out(&out)
+}
 
 #[tauri::command]
 pub fn stt_state() -> SttState { STATE.lock().unwrap().clone() }
@@ -28,7 +68,32 @@ pub fn toggle() {
 }
 
 pub fn start() {
-    if STATE.lock().unwrap().active { logf!("stt", "start ignored: already listening"); return; }
+    WANT.store(true, Ordering::Relaxed);
+    if BROWSER.load(Ordering::Relaxed) {
+        *STATE.lock().unwrap() = SttState { active: true, ..Default::default() };
+        logf!("stt", "start: browser engine listening");
+        emit("stt://start");
+        return;
+    }
+    // In hold mode a quick re-press can land while the previous session is still closing; queue it
+    // instead of dropping the press ("start ignored" used to lose the whole utterance).
+    if STATE.lock().unwrap().active {
+        logf!("stt", "start: previous session still closing, queued");
+        thread::spawn(|| {
+            for _ in 0..100 {
+                if !WANT.load(Ordering::Relaxed) { logf!("stt", "start: queued press cancelled"); return; }
+                if !STATE.lock().unwrap().active { break; }
+                thread::sleep(Duration::from_millis(20));
+            }
+            start_now();
+        });
+        return;
+    }
+    start_now();
+}
+
+fn start_now() {
+    if !WANT.load(Ordering::Relaxed) || STATE.lock().unwrap().active { return; }
     let (tx, rx) = channel();
     *STOP.lock().unwrap() = Some(tx);
     *STATE.lock().unwrap() = SttState { active: true, ..Default::default() };
@@ -50,6 +115,13 @@ pub fn start() {
 }
 
 pub fn stop() {
+    WANT.store(false, Ordering::Relaxed);
+    if BROWSER.load(Ordering::Relaxed) {
+        STATE.lock().unwrap().active = false;
+        logf!("stt", "stop: browser engine");
+        emit("stt://stop");
+        return;
+    }
     let had = STOP.lock().unwrap().take();
     logf!("stt", "stop requested ({})", if had.is_some() { "session running" } else { "nothing running" });
     if let Some(tx) = had { let _ = tx.send(()); }
@@ -100,6 +172,9 @@ mod imp {
         }
         Ok(sent as usize)
     }
+
+    /// Public wrapper so the browser engine can reuse the same SendInput path.
+    pub fn type_out(s: &str) -> Result<usize, String> { type_text(s) }
 
     pub fn run(rx: Receiver<()>) -> Result<(), String> {
         // this worker thread needs its own WinRT apartment before touching SpeechRecognizer
@@ -194,5 +269,6 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::*;
+    pub fn type_out(_: &str) -> Result<usize, String> { Err("Typing needs Windows".into()) }
     pub fn run(_: Receiver<()>) -> Result<(), String> { logf!("stt", "run: not on Windows"); Err("Dictation needs Windows".into()) }
 }

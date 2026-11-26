@@ -124,6 +124,7 @@ mod imp {
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(15) {
             if cancel.load(Ordering::Relaxed) { logf!("hotkey", "record: cancelled"); return Err("cancelled".into()); }
+            if down(0x1B) { logf!("hotkey", "record: Escape, cancelled"); return Err("cancelled".into()); }
             sleep(Duration::from_millis(8));
             let Some(vk) = (0x08u16..=0xDE).find(|&v| name(v).is_some() && down(v)) else { continue };
             let mut parts: Vec<String> = Vec::new();

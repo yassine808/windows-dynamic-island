@@ -13,13 +13,17 @@ mod stats;
 mod stt;
 mod tools;
 
-use std::{sync::{Arc, Mutex}, thread, time::Duration};
-use tauri::{Manager, PhysicalPosition, PhysicalSize, State};
+use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 use tauri_plugin_global_shortcut::ShortcutState;
 
 #[derive(Default)]
 struct Hit { r: [f64; 4], dragging: bool, p: (f64, f64, bool, bool), mons: Vec<[f64; 4]> }
 type Shared = Arc<Mutex<Hit>>;
+
+/// Pointer snapshot pushed to the webview; the UI no longer polls for it.
+#[derive(Clone, serde::Serialize)]
+struct Ptr { x: f64, y: f64, down: bool, inside: bool }
 
 #[cfg(windows)]
 fn lbutton() -> bool {
@@ -125,6 +129,12 @@ fn main() {
     }));
     let shared: Shared = Arc::new(Mutex::new(Hit::default()));
     tauri::Builder::default()
+        // The streaming recognizer lives in the webview and needs the microphone. Without this hook
+        // WebView2 denies the request and dictation silently falls back to the slow Windows engine.
+        .on_permission_request(|_webview, kind| match kind {
+            tauri::webview::PermissionKind::Microphone => tauri::webview::PermissionResponse::Allow,
+            _ => tauri::webview::PermissionResponse::Default,
+        })
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|_app, _sc, ev| match ev.state() {
@@ -142,12 +152,14 @@ fn main() {
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
             media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_dragging, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
+            stt::stt_engine, stt::stt_ended, stt::stt_type,
             hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::cancel_record_shortcut,
             stats::stats, mixer::mixer_get, mixer::mixer_set_vol, mixer::mixer_set_mute,
             tools::clip_list, tools::clip_copy, tools::clip_clear, tools::set_clipboard, tools::pixel_at_cursor, tools::screenshot
         ])
         .setup(move |app| {
             logf!("win", "setup: initialising the dictation shortcut");
+            stt::bind(app.handle().clone());
             hotkey::init(app.handle());
             logf!("win", "setup: starting stats and tools");
             stats::start();
@@ -177,24 +189,32 @@ fn main() {
             shared.lock().unwrap().mons = list.into_iter().map(|(r, _)| r).collect();
             win.set_ignore_cursor_events(true)?;
 
-            // Window stays fully click-through. Rust reads the mouse and forwards it to the UI.
+            // Window stays fully click-through. Rust reads the mouse and pushes every change to the UI;
+            // the old 16 ms JS poll missed fast clicks and kept a 60 Hz timer alive for nothing.
             let hwnd = win.hwnd()?.0 as isize;
             // The overlay never moves after setup, so cache its top-left for cursor math.
             let (ox, oy) = (minx as f64, miny as f64);
             tools::OVERLAY.store(hwnd, std::sync::atomic::Ordering::Relaxed);
             let winc = win.clone();
+            let app = app.handle().clone();
             logf!("win", "mouse thread starting, hwnd={hwnd} scale={scale}");
             thread::spawn(move || {
-                let mut n = 0u32;
                 let mut interactive = false;
                 let mut hidden = false;
                 let mut fs = false;
+                let mut next_fs = Instant::now();
+                let mut sent: Option<Ptr> = None;
+                let mut ticks = 0u32;
                 loop {
-                    thread::sleep(Duration::from_millis(8));
-                    n += 1;
+                    let (dragging, down0) = { let g = shared.lock().unwrap(); (g.dragging, g.p.2) };
+                    // 8 ms while the island can be grabbed, 32 ms otherwise, 100 ms while a game owns the mouse
+                    let ms = if hidden { 100 } else if interactive || dragging || down0 { 8 } else { 32 };
+                    thread::sleep(Duration::from_millis(ms));
+                    ticks += 1;
+                    let now = Instant::now();
+                    if now >= next_fs { fs = fullscreen_app(hwnd); next_fs = now + Duration::from_millis(250); }
                     // fullscreen game in front AND its cursor is hidden (mouse-look gameplay): island stays visible
                     // but never takes the mouse. If the cursor is showing (menus), the island stays usable.
-                    if n % 25 == 0 { fs = fullscreen_app(hwnd); }
                     let sup = fs && !cursor_visible();
                     if sup != hidden {
                         hidden = sup;
@@ -204,6 +224,10 @@ fn main() {
                             let mut g = shared.lock().unwrap();
                             g.dragging = false;
                             g.p = (-1e6, -1e6, false, false);
+                            drop(g);
+                            let p = Ptr { x: -1e6, y: -1e6, down: false, inside: false };
+                            let _ = app.emit("ptr", p.clone());
+                            sent = Some(p);
                             logf!("ptr", "fullscreen app with a hidden cursor: island input paused");
                         } else {
                             logf!("ptr", "fullscreen app gone: island input resumed");
@@ -212,11 +236,10 @@ fn main() {
                     if hidden { continue; }
                     let Some((px, py)) = cursor_at(ox, oy) else { continue };
                     let (x, y) = (px / scale, py / scale);
+                    let down = lbutton();
                     let (r, dragging) = { let g = shared.lock().unwrap(); (g.r, g.dragging) };
                     let pad = 10.0;
                     let inside = r[2] > 0.0 && x >= r[0] - pad && x <= r[0] + r[2] + pad && y >= r[1] - pad && y <= r[1] + r[3] + pad;
-                    let down = lbutton();
-                    shared.lock().unwrap().p = (x, y, down, inside);
                     // Over the island the window takes the mouse, so clicks never reach what's behind it.
                     let over = r[2] > 0.0 && x >= r[0] - 1.0 && x <= r[0] + r[2] + 1.0 && y >= r[1] - 1.0 && y <= r[1] + r[3] + 1.0;
                     let want = over || dragging;
@@ -224,6 +247,17 @@ fn main() {
                         interactive = want;
                         let _ = winc.set_ignore_cursor_events(!want);
                         logf!("ptr", "click-through {} at ({x:.0},{y:.0})", if want { "off (island takes the mouse)" } else { "on" });
+                    }
+                    shared.lock().unwrap().p = (x, y, down, inside);
+                    // Push press/release/hover edges immediately (a fast click is two ticks of the same
+                    // mouse), stream while a button is held inside the island (drag and scrub), and keep a
+                    // once-a-second heartbeat so a reloaded webview always recovers the state.
+                    let edge = sent.as_ref().map_or(true, |p| p.down != down || p.inside != inside);
+                    let moved = sent.as_ref().map_or(true, |p| (p.x - x).abs() >= 0.5 || (p.y - y).abs() >= 0.5);
+                    if edge || dragging || (down && inside) || (moved && inside) || ticks % 32 == 0 {
+                        let p = Ptr { x, y, down, inside };
+                        let _ = app.emit("ptr", p.clone());
+                        sent = Some(p);
                     }
                 }
             });

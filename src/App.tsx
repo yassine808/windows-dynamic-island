@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { AnimatePresence, animate, motion, MotionValue, useMotionValue, useTransform } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { createSpeech, speechAvailable } from "./speech";
 
 type Media = { title: string; artist: string; playing: boolean; position: number; duration: number; at: number } | null;
 type Stt = { active: boolean; partial: string; text: string; err: string };
@@ -125,11 +127,61 @@ function useTint(art: string | null) {
 function useStt() {
   const [stt, setStt] = useState<Stt>({ active: false, partial: "", text: "", err: "" });
   const last = useRef("");
+  const lastPartialLog = useRef(0);
+  const local = useRef(false); // the browser engine is running the show (no WinRT polling then)
+  useEffect(() => {
+    if (!TAURI) return;
+    const ok = speechAvailable();
+    local.current = ok;
+    dbg(`stt: browser engine ${ok ? "available" : "missing"}`);
+    // no audio involved: just report what WebView2 thinks of the microphone
+    navigator.permissions?.query({ name: "microphone" as PermissionName })
+      .then((p) => dbg(`stt: mic permission ${p.state}`))
+      .catch(() => dbg("stt: mic permission unknown"));
+    if (!ok) return;
+    let alive = true;
+    call("stt_engine", { browser: true });
+    let rec = createSpeech({
+      partial: (t) => {
+        setStt((s) => (s.partial === t ? s : { ...s, partial: t }));
+        // visible proof in the log that words arrive while you speak
+        const now = performance.now();
+        if (now - lastPartialLog.current > 700) { lastPartialLog.current = now; dbg(`stt: interim "${t.slice(-60)}"`); }
+      },
+      final: (t) => {
+        if (!alive) return;
+        setStt((s) => ({ ...s, text: `${s.text}${t} `, partial: "" }));
+        dbg(`stt: final "${t}"`);
+        call("stt_type", { text: t });
+      },
+      error: (msg) => {
+        // engine is unusable here: hand dictation back to the Windows recognizer for the next press
+        local.current = false;
+        if (!alive) return;
+        setStt((s) => ({ ...s, err: msg, active: false, partial: "" }));
+        call("stt_engine", { browser: false });
+        call("stt_ended");
+        dbg(`stt: browser engine fell back (${msg})`);
+      },
+      end: () => {
+        if (!alive) return;
+        setStt((s) => (s.active || s.partial ? { ...s, active: false, partial: "" } : s));
+        call("stt_ended"); // keep the Rust state machine in sync when the engine stops by itself
+      },
+    });
+    let gone = false;
+    const offs: Array<() => void> = [];
+    const sub = (p: Promise<() => void>) => p.then((f) => (gone ? f() : offs.push(f))).catch(() => {});
+    sub(listen("stt://start", () => { if (!alive) return; setStt((s) => ({ ...s, active: true, err: "" })); rec.start(); }));
+    sub(listen("stt://stop", () => rec.stop()));
+    return () => { alive = false; gone = true; rec.abort(); offs.forEach((f) => f()); };
+  }, []);
+  // Windows recognizer fallback: polled only while the browser engine is not in charge.
   useEffect(() => {
     if (!TAURI) return;
     let busy = false;
     const id = setInterval(async () => {
-      if (busy) return;
+      if (local.current || busy) return;
       busy = true;
       try {
         const s = await invoke<Stt>("stt_state");
@@ -400,13 +452,26 @@ export default function App() {
   const toggleStt = () => !once() ? undefined : (TAURI ? call("stt_toggle") : setStt((s) => ({ ...s, active: !s.active, text: s.active ? s.text : "", partial: s.active ? "" : "Dictation preview, words appear as you speak" })));
 
   useEffect(() => { if (stt.active) { setDir(0); setPage(1); } }, [stt.active]);
+  // refs read from the pointer handler and the timers below (they run outside React's render)
+  const sttRef = useRef(stt); sttRef.current = stt;
+  const holdRef = useRef(cfg.hold); holdRef.current = cfg.hold;
   useEffect(() => { if (TAURI) invoke<{ shortcut: string; hold: boolean }>("stt_settings").then(setCfg).catch(() => {}); }, []);
   const pretty = (k: string) => k.split("+").map((p) => p.replace(/^Key|^Digit/, "").replace(/^Arrow/, "")).join(" + ");
   const setHold = (hold: boolean) => { setCfg((c) => ({ ...c, hold })); call("set_stt_hold", { hold }); };
+  const recordGate = useRef(0);
   const record = async () => {
-    if (!once()) return;
-    if (rec) { if (TAURI) call("cancel_record_shortcut"); else recCancel.current?.(); return; }
-    setRec(true); setRecErr("");
+    // Cancel is immediate (a second press on the chip must never be swallowed); only re-arming is debounced.
+    if (rec) {
+      dbg("shortcut record: cancelled from the UI");
+      if (TAURI) call("cancel_record_shortcut"); else recCancel.current?.();
+      return;
+    }
+    const now = performance.now();
+    if (now - recordGate.current < 400) return;
+    recordGate.current = now;
+    setRecErr("");
+    setRec(true);
+    dbg("shortcut record: armed, waiting for keys");
     try {
       const k = TAURI ? await invoke<string>("record_shortcut") : await new Promise<string>((res, rej) => {
         const h = (e: KeyboardEvent) => {
@@ -419,6 +484,7 @@ export default function App() {
         recCancel.current = () => { removeEventListener("keydown", h); rej("cancelled"); };
       });
       setCfg((c) => ({ ...c, shortcut: k }));
+      dbg(`shortcut record: saved ${k}`);
     } catch (e) { if (String(e) !== "cancelled") setRecErr(String(e)); }
     setRec(false);
   };
@@ -513,17 +579,20 @@ export default function App() {
     return () => clearTimeout(id);
   }, [edge, hover, dragging, stt.active, nonce, hideUD, hideLR, pick]);
 
-  // report hit rect so Rust can toggle click-through
+  // report hit rect so Rust can toggle click-through; driven by the springs themselves, so an idle
+  // island costs nothing instead of running a 60 Hz timer
   useEffect(() => {
     if (!TAURI) return;
     let last = "";
-    const id = setInterval(() => {
+    const push = () => {
       const s = lift.get(), cw = w.get() * s, ch = h.get() * s;
       const px = x.get() - (cw - w.get()) / 2, py = y.get() - (ch - h.get()) / 2;
       const k = [px, py, cw, ch].map((n) => Math.round(n)).join();
       if (k !== last) { last = k; invoke("set_hit_rect", { x: px, y: py, w: cw, h: ch }); }
-    }, 16);
-    return () => clearInterval(id);
+    };
+    const stops = [x, y, w, h, lift].map((v) => v.on("change", push));
+    push();
+    return () => stops.forEach((off) => off());
   }, []);
 
   // drag + snap
@@ -621,10 +690,12 @@ export default function App() {
     if (skb.current) { seekTo((e.clientX - skb.current.left) / skb.current.width, true, skid.current); skb.current = null; } else pup();
   };
 
-  // Tauri: Rust reads the mouse (window stays click-through elsewhere); we poll it
+  // Tauri: Rust reads the mouse (window stays click-through elsewhere) and pushes every change, so a
+  // fast click can never fall between two polls and idle costs no timer at all.
   useEffect(() => {
     if (!TAURI) return;
     let active = false, btn: HTMLElement | null = null, sk: DOMRect | null = null, skId: string | undefined;
+    let held = false; // the dictation mic is being held down in Hold mode
     const frac = (p: P) => (sk ? (p.x - sk.left) / sk.width : 0);
     const onPtr = (p: P) => {
       if (!d.current?.on) setHover(p.inside);
@@ -636,7 +707,14 @@ export default function App() {
         btn = el?.closest("button") as HTMLElement | null;
         const seek = !btn ? (el?.closest(".seek:not(.off)") as HTMLElement | null) : null;
         if (seek) { sk = seek.getBoundingClientRect(); skId = seek.dataset.id; seekFn.current(frac(p), false, skId); }
-        else if (btn) btn.classList.add("pressed"); else f.pdown(p.x, p.y);
+        else if (btn) {
+          btn.classList.add("pressed");
+          // Hold mode: the mic button is push-to-talk, exactly like the global shortcut
+          if (holdRef.current && btn.dataset.dict === "1") {
+            held = true;
+            if (!sttRef.current.active) call("stt_toggle");
+          }
+        } else f.pdown(p.x, p.y);
       } else if (p.down && active) {
         if (sk) seekFn.current(frac(p), false, skId);
         else if (!btn) f.pmove(p.x, p.y);
@@ -645,19 +723,17 @@ export default function App() {
         if (sk) { seekFn.current(frac(p), true, skId); sk = null; skId = undefined; }
         else if (btn) {
           btn.classList.remove("pressed");
-          if (document.elementFromPoint(p.x, p.y)?.closest("button") === btn) btn.click();
+          if (held) { held = false; if (sttRef.current.active) call("stt_toggle"); }
+          else if (document.elementFromPoint(p.x, p.y)?.closest("button") === btn) btn.click();
           btn = null;
         } else f.pup();
       }
     };
-    let busy = false;
-    const id = setInterval(async () => {
-      if (busy) return;
-      busy = true;
-      try { onPtr(await invoke<P>("get_ptr")); } catch (err) { dbg("get_ptr failed: " + String(err)); }
-      busy = false;
-    }, 16);
-    return () => clearInterval(id);
+    let un: (() => void) | undefined, gone = false;
+    listen<P>("ptr", (e) => onPtr(e.payload))
+      .then((f) => { if (gone) f(); else un = f; })
+      .catch((err) => dbg("ptr listener failed: " + String(err)));
+    return () => { gone = true; un?.(); };
   }, []);
 
   // all monitors (the overlay spans them), primary first
@@ -743,7 +819,7 @@ export default function App() {
             {mode === "expanded" && page === 1 && (
               <motion.div key="ex1" className="row ex" custom={dir} {...vp}>
                 <div className="top">
-                  <button className={`micbtn ${stt.active ? "on" : ""}`} onClick={toggleStt}>{Icon.mic}</button>
+                  <button className={`micbtn ${stt.active ? "on" : ""}`} data-dict="1" onClick={toggleStt}>{Icon.mic}</button>
                   <div className="col">
                     <div className="title">Dictation</div>
                     <div className={`artist ${stt.err || recErr ? "err" : ""}`}>{stt.err || recErr || (rec ? "Press keys…" : cfg.hold ? "Hold to talk" : "Tap to talk")}</div>
