@@ -155,10 +155,7 @@ fn main() {
                         }
                     }
                     if hidden { continue; }
-                    let Some((px, py)) = cursor_rel(hwnd) else {
-                        if n % 120 == 0 { println!("[rust] cursor read failed"); }
-                        continue;
-                    };
+                    let Some((px, py)) = cursor_rel(hwnd) else { continue };
                     let (x, y) = (px / scale, py / scale);
                     let (r, dragging) = { let g = shared.lock().unwrap(); (g.r, g.dragging) };
                     let pad = 10.0;
@@ -169,7 +166,6 @@ fn main() {
                     let over = r[2] > 0.0 && x >= r[0] - 1.0 && x <= r[0] + r[2] + 1.0 && y >= r[1] - 1.0 && y <= r[1] + r[3] + 1.0;
                     let want = over || dragging;
                     if want != interactive { interactive = want; let _ = winc.set_ignore_cursor_events(!want); }
-                    if n % 120 == 0 { println!("[rust] cursor=({:.0},{:.0}) rect={:?} inside={} down={}", x, y, r, inside, down); }
                 }
             });
             Ok(())
