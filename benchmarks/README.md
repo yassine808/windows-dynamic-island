@@ -56,6 +56,18 @@ One row per press:
 
 `-Csv` appends only sessions that are not already in `stt-latency.csv`, so it can be run repeatedly.
 
+### Local recognizer (offline candidate)
+
+`local-stt.py` feeds a WAV to sherpa-onnx's streaming zipformer in 100 ms blocks, the same way live
+audio arrives, and prints when the first words appear, the real-time factor and the transcript.
+Compare it with an app row for the same phrase.
+
+```powershell
+pip install sherpa-onnx numpy
+# model: https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+python .\local-stt.py <extracted-model-dir> phrase.wav
+```
+
 ```powershell
 # print the last 20 sessions with per-engine medians
 .\stt.ps1
@@ -72,6 +84,8 @@ One row per press:
 | 2026-11-26 | WebView2 streaming engine is ready in **18 ms median** and opens the mic in **218 ms**, but every session died with a `network` error 359 ms in: WebView2 sends speech to the Ceto service (`api.msedgeservices.com`), which answers 403 (Microsoft bug, still present in runtime 156+). |
 | 2026-11-26 | Fix: `--disable-features=…,msSpeechRecognitionServiceUseCetoService` in `additionalBrowserArgs` routes it to `speech.platform.bing.com` instead. Self-test spoken through the speakers: mic open 168 ms, first words 2.7 s after the press, final 4.9 s after the press, transcript `This is a dictation benchmark test 123.` — no fallback, no key, no quota. |
 | 2026-11-26 | Rows spoken by the text-to-speech self-test are marked by their timestamp (03:22) and take their `first_words_ms` from a pause before the voice starts; real presses read lower. |
+| 2026-11-26 | Live preview check (03:44): press → engine accepted **247 ms** → mic open **525 ms** → first interim `this is` **1.9 s**, then a new interim every **~0.9 s** (`this is a dictation benchmark`, `… test 123`), final **4.2 s**. The audio was played from a file, so ~1.4 s of that is the player's start-up before the first word reached the mic; the recognizer itself emits the first words 4 ms after it reports sound. |
+| 2026-11-26 | Offline candidate, same WAV through sherpa-onnx streaming zipformer (int8, 70 MB, 4 threads): first words **0.70 s** into the audio, a new partial every **0.3 s**, whole 3.8 s clip computed in **327 ms** (real-time factor **0.09**), transcript `THIS IS A DICTATION BENCH MARK TEST ONE TWO THREE`. Faster partials and no network, but uppercase with no punctuation and `benchmark` split in two, so the webview engine still wins on text quality. |
 
 ## Files
 
@@ -81,6 +95,7 @@ One row per press:
 | `measure.ps1` | the CPU/RAM sampler |
 | `stt-latency.csv` | one row per dictation session |
 | `stt.ps1` | the dictation latency parser |
+| `local-stt.py` | offline streaming recognizer benchmark (sherpa-onnx) |
 
 ## History
 

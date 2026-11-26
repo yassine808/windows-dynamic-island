@@ -1,5 +1,6 @@
 // Append-only log file so the island can be inspected after the fact.
-// Default: %LOCALAPPDATA%\islandwin\islandwin.log — override the path with ISLANDWIN_LOG.
+// Default: %APPDATA%\dev.yassine808.islandwin\logs\islandwin.log (beside settings.json, outside the
+// install folder so an upgrade keeps it). Override the path with ISLANDWIN_LOG.
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -16,10 +17,12 @@ pub fn path() -> PathBuf {
     if let Some(p) = std::env::var_os("ISLANDWIN_LOG") {
         return PathBuf::from(p);
     }
-    std::env::var_os("LOCALAPPDATA")
+    // Beside settings.json, outside the install directory: an upgrade or uninstall keeps it.
+    std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("islandwin")
+        .join("dev.yassine808.islandwin")
+        .join("logs")
         .join("islandwin.log")
 }
 
@@ -39,6 +42,12 @@ fn stamp() -> String {
 pub fn init() {
     let p = path();
     if let Some(d) = p.parent() { let _ = fs::create_dir_all(d); }
+    // carry the log over from the old per-install location once, so history is not lost
+    if !p.exists() {
+        if let Some(old) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).map(|d| d.join("islandwin").join("islandwin.log")) {
+            if old.exists() { let _ = fs::copy(&old, &p); }
+        }
+    }
     // keep one previous file once the log grows past 5 MB
     if fs::metadata(&p).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {
         let _ = fs::rename(&p, p.with_extension("old.log"));
@@ -63,5 +72,7 @@ pub fn write(tag: &str, msg: &str) {
             let _ = f.flush();
         }
     }
-    print!("{line}");
+    // A packaged app has no console, and `tauri dev` can lose one when the parent shell exits.
+    // `print!` panics on a write error, which would take the whole app down just for a log line.
+    let _ = std::io::stdout().write_all(line.as_bytes());
 }

@@ -11,8 +11,8 @@ type Tm = { total: number; left: number; end: number; running: boolean; done: bo
 type Mix = { vol: number; mute: boolean; mic: number; mic_mute: boolean; ok: boolean };
 type St = { cpu: number; ram: number; gpu: number; down: number; up: number };
 type Px = { hex: string; r: number; g: number; b: number };
-const PAGES = 7; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 tools, 6 auto-hide
-const PAGE_H = [190, 138, 160, 140, 150, 230, 152];
+const PAGES = 7; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 tools, 6 settings
+const PAGE_H = [190, 138, 160, 140, 150, 230, 246];
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 // one wheel of the timer picker: scroll over it (or click the dim numbers) to change the value; wraps around
@@ -375,6 +375,33 @@ export default function App() {
     (k === "ud" ? setHideUD : setHideLR)(v);
     try { localStorage.setItem(k === "ud" ? "hideUD" : "hideLR", v ? "on" : "off"); } catch {}
   };
+  // step aside while a windowed (borderless) fullscreen app owns the screen; the game-style exclusive
+  // fullscreen case is already handled in Rust, this is the one that leaves the cursor on the desktop
+  const [hideFs, setHideFs] = useState<boolean>(() => {
+    try { return localStorage.getItem("hideFS") === "on"; } catch { return false; }
+  });
+  const [fsApp, setFsApp] = useState<"none" | "windowed" | "full">("none");
+  const setHideFsPref = (v: boolean) => {
+    setHideFs(v);
+    try { localStorage.setItem("hideFS", v ? "on" : "off"); } catch {}
+  };
+  // Start with Windows: the setup turns it on while installing, this switch flips the same Run value.
+  // (The browser demo has no registry, so it shows the shipping default.)
+  const [autoOn, setAutoOn] = useState<boolean>(() => !TAURI);
+  useEffect(() => { if (TAURI) invoke<boolean>("autostart_get").then(setAutoOn).catch(() => {}); }, []);
+  const setAuto = (on: boolean) => {
+    setAutoOn(on);
+    call("autostart_set", { on }).catch((e) => { setAutoOn(!on); setRecErr(`Autostart: ${String(e)}`); });
+  };
+  useEffect(() => {
+    if (!TAURI) return;
+    let gone = false;
+    let un: (() => void) | undefined;
+    listen<{ full: boolean; windowed: boolean }>("fs", (e) => setFsApp(e.payload.windowed ? "windowed" : e.payload.full ? "full" : "none"))
+      .then((f) => { if (gone) f(); else un = f; })
+      .catch(() => {});
+    return () => { gone = true; un?.(); };
+  }, []);
 
   // ---- mixer / stats / tools state ----
   const [mix, setMix] = useState<Mix>({ vol: 0.5, mute: false, mic: 0.8, mic_mute: false, ok: true });
@@ -474,22 +501,59 @@ export default function App() {
     setRecErr("");
     setRec(true);
     dbg("shortcut record: armed, waiting for keys");
-    try {
-      const k = TAURI ? await invoke<string>("record_shortcut") : await new Promise<string>((res, rej) => {
-        const h = (e: KeyboardEvent) => {
-          if (/^(Control|Shift|Alt|Meta)/.test(e.code)) return;
-          e.preventDefault(); removeEventListener("keydown", h); recCancel.current = null;
-          if (e.code === "Escape") return rej("cancelled");
-          res([e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super", e.code].filter(Boolean).join("+"));
-        };
-        addEventListener("keydown", h);
-        recCancel.current = () => { removeEventListener("keydown", h); rej("cancelled"); };
-      });
-      setCfg((c) => ({ ...c, shortcut: k }));
-      dbg(`shortcut record: saved ${k}`);
-    } catch (e) { if (String(e) !== "cancelled") setRecErr(String(e)); }
+    if (TAURI) {
+      // A combo that is already taken or a bare letter sends you straight back to "press keys"
+      // instead of dropping out of recording, so the chip can always be reassigned.
+      for (let i = 0; i < 10; i++) {
+        try {
+          const k = await invoke<string>("record_shortcut");
+          setCfg((c) => ({ ...c, shortcut: k }));
+          setRecErr("");
+          dbg(`shortcut record: saved ${k}`);
+          break;
+        } catch (e) {
+          const msg = String(e);
+          if (msg === "cancelled") break;
+          setRecErr(msg);
+          dbg(`shortcut record: rejected (${msg})`);
+          if (!/add ctrl|not a shortcut|cannot be a shortcut|already|taken|register/i.test(msg)) break;
+          await new Promise((r) => setTimeout(r, 260));
+        }
+      }
+    } else {
+      try {
+        const k = await new Promise<string>((res, rej) => {
+          const h = (e: KeyboardEvent) => {
+            if (/^(Control|Shift|Alt|Meta)/.test(e.code)) return;
+            e.preventDefault(); removeEventListener("keydown", h); recCancel.current = null;
+            if (e.code === "Escape") return rej("cancelled");
+            res([e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super", e.code].filter(Boolean).join("+"));
+          };
+          addEventListener("keydown", h);
+          recCancel.current = () => { removeEventListener("keydown", h); rej("cancelled"); };
+        });
+        setCfg((c) => ({ ...c, shortcut: k }));
+        dbg(`shortcut record: saved ${k}`);
+      } catch (e) { if (String(e) !== "cancelled") setRecErr(String(e)); }
+    }
     setRec(false);
   };
+
+  // While recording, the island takes the keyboard (Rust lifts its no-activate style), so the
+  // webview sees the keys itself. That is the path that still works when the foreground app is
+  // elevated and a low-level hook gets nothing; Rust takes whichever source reports first.
+  useEffect(() => {
+    if (!TAURI || !rec) return;
+    const h = (e: KeyboardEvent) => {
+      if (e.repeat || /^(Control|Shift|Alt|Meta|OS)/.test(e.key)) return;
+      if (e.code === "Escape") { e.preventDefault(); call("cancel_record_shortcut"); return; }
+      e.preventDefault(); e.stopPropagation();
+      const parts = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super", e.code].filter(Boolean);
+      call("record_submit", { key: parts.join("+") }).catch((err) => setRecErr(String(err)));
+    };
+    addEventListener("keydown", h, true);
+    return () => removeEventListener("keydown", h, true);
+  }, [rec]);
 
   // live data only while the matching page is open
   const open = mode === "expanded";
@@ -582,11 +646,13 @@ export default function App() {
   // tuck into the edge when idle (if that edge's axis is enabled)
   useEffect(() => {
     setTucked(false);
+    // a windowed fullscreen app in front (and the setting on): leave the screen to it
+    if (hideFs && fsApp === "windowed") { setTucked(true); return; }
     const can = edge === "top" || edge === "bottom" ? hideUD : hideLR;
     if (!can || hover || dragging || stt.active || pick) return;
     const id = setTimeout(() => setTucked(true), 2500);
     return () => clearTimeout(id);
-  }, [edge, hover, dragging, stt.active, nonce, hideUD, hideLR, pick]);
+  }, [edge, hover, dragging, stt.active, nonce, hideUD, hideLR, pick, hideFs, fsApp]);
 
   // report hit rect so Rust can toggle click-through; driven by the springs themselves, so an idle
   // island costs nothing instead of running a 60 Hz timer
@@ -837,7 +903,7 @@ export default function App() {
                 </div>
                 <div className="cfg">
                   <button className={`chip ${rec ? "rec" : ""}`} aria-label="Record shortcut" onClick={record}>
-                    <i className="dot" />{rec ? "Press keys…" : pretty(cfg.shortcut)}
+                    <i className="dot" />{rec ? (recErr || "Press keys…") : pretty(cfg.shortcut)}
                   </button>
                   <div className="seg" role="group" aria-label="Shortcut mode">
                     <button className={cfg.hold ? "on" : ""} onClick={() => setHold(true)}>Hold</button>
@@ -919,9 +985,10 @@ export default function App() {
               <motion.div key="ex6" className="row ex" custom={dir} {...vp}>
                 <div className="top">
                   <div className="col">
-                    <div className="title">Auto-hide</div>
+                    <div className="title">Settings</div>
                     <div className="artist">
-                      {!hideUD && !hideLR ? "Always visible" : hideUD && hideLR ? "Hides on every edge" : hideUD ? "Hides when up or down" : "Hides when left or right"}
+                      {hideFs && fsApp === "windowed" ? "Hidden: fullscreen app" : !hideUD && !hideLR ? "Always visible" : hideUD && hideLR ? "Hides on every edge" : hideUD ? "Hides when up or down" : "Hides when left or right"}
+                      {autoOn ? " · Starts with Windows" : ""}
                     </div>
                   </div>
                 </div>
@@ -938,6 +1005,20 @@ export default function App() {
                     <div className="seg" role="group" aria-label="Auto-hide on left and right">
                       <button className={hideLR ? "" : "on"} onClick={() => setHidePref("lr", false)}>Off</button>
                       <button className={hideLR ? "on" : ""} onClick={() => setHidePref("lr", true)}>On</button>
+                    </div>
+                  </div>
+                  <div className="cfg">
+                    <span className="hint">Fullscreen</span>
+                    <div className="seg" role="group" aria-label="Hide while a windowed fullscreen app is in front">
+                      <button className={hideFs ? "" : "on"} onClick={() => setHideFsPref(false)}>Off</button>
+                      <button className={hideFs ? "on" : ""} onClick={() => setHideFsPref(true)}>On</button>
+                    </div>
+                  </div>
+                  <div className="cfg">
+                    <span className="hint">Start with Windows</span>
+                    <div className="seg" role="group" aria-label="Start IslandWin with Windows">
+                      <button className={autoOn ? "" : "on"} onClick={() => setAuto(false)}>Off</button>
+                      <button className={autoOn ? "on" : ""} onClick={() => setAuto(true)}>On</button>
                     </div>
                   </div>
                 </div>

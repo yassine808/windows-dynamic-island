@@ -5,6 +5,7 @@ macro_rules! logf {
     ($tag:expr, $($arg:tt)*) => { crate::logger::write($tag, &format!($($arg)*)) };
 }
 
+mod autostart;
 mod hotkey;
 mod logger;
 mod media;
@@ -155,7 +156,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_dragging, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
             stt::stt_engine, stt::stt_ended, stt::stt_type,
-            hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::cancel_record_shortcut,
+            hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::record_submit, hotkey::cancel_record_shortcut,
+autostart::autostart_get, autostart::autostart_set,
             stats::stats, mixer::mixer_get, mixer::mixer_set_vol, mixer::mixer_set_mute,
             tools::clip_list, tools::clip_copy, tools::clip_clear, tools::set_clipboard, tools::pixel_at_cursor, tools::screenshot
         ])
@@ -163,6 +165,7 @@ fn main() {
             logf!("win", "setup: initialising the dictation shortcut");
             stt::bind(app.handle().clone());
             hotkey::init(app.handle());
+            autostart::init();
             logf!("win", "setup: starting stats and tools");
             stats::start();
             tools::init();
@@ -205,6 +208,8 @@ fn main() {
                 let mut hidden = false;
                 let mut fs = false;
                 let mut next_fs = Instant::now();
+                let mut fs_seen: Option<(bool, bool)> = None;
+                let mut next_fs_emit = Instant::now();
                 let mut sent: Option<Ptr> = None;
                 let mut ticks = 0u32;
                 loop {
@@ -215,9 +220,22 @@ fn main() {
                     ticks += 1;
                     let now = Instant::now();
                     if now >= next_fs { fs = fullscreen_app(hwnd); next_fs = now + Duration::from_millis(250); }
+                    let cur = cursor_visible();
                     // fullscreen game in front AND its cursor is hidden (mouse-look gameplay): island stays visible
                     // but never takes the mouse. If the cursor is showing (menus), the island stays usable.
-                    let sup = fs && !cursor_visible();
+                    let sup = fs && !cur;
+                    // a windowed/borderless fullscreen app (the cursor is still there) can ask the island to hide
+                    let wfs = fs && cur;
+                    let changed = fs_seen != Some((fs, wfs));
+                    if changed {
+                        logf!("ptr", "foreground: {}", if !fs { "no fullscreen app" } else if wfs { "windowed fullscreen app" } else { "exclusive fullscreen app" });
+                    }
+                    // re-send every couple of seconds so a reloaded webview recovers the state
+                    if changed || now >= next_fs_emit {
+                        fs_seen = Some((fs, wfs));
+                        next_fs_emit = now + Duration::from_secs(2);
+                        let _ = app.emit("fs", serde_json::json!({ "full": fs, "windowed": wfs }));
+                    }
                     if sup != hidden {
                         hidden = sup;
                         if sup {
