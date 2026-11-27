@@ -13,7 +13,7 @@ Windows 10/11 · no administrator rights · 2.4 MB
 
 ## Install
 
-1. Download `IslandWin_0.1.3_x64-setup.exe`.
+1. Download `IslandWin_0.1.4_x64-setup.exe`.
 2. Run it. No administrator rights are needed.
 3. IslandWin starts with Windows by default. You can turn that off in its Settings.
 
