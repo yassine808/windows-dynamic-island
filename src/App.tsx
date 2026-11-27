@@ -583,6 +583,14 @@ export default function App() {
     setPosLock(v);
     try { localStorage.setItem("posLock", v ? "on" : "off"); } catch {}
   };
+  // Ambient light: the blurred cover-colour glow around the island. The waveform keeps its tint.
+  const [ambient, setAmbient] = useState<boolean>(() => {
+    try { return localStorage.getItem("ambient") !== "off"; } catch { return true; }
+  });
+  const setAmbientPref = (v: boolean) => {
+    setAmbient(v);
+    try { localStorage.setItem("ambient", v ? "on" : "off"); } catch {}
+  };
   // Start with Windows: the setup turns it on while installing, this switch flips the same Run value.
   // (The browser demo has no registry, so it shows the shipping default.)
   const [autoOn, setAutoOn] = useState<boolean>(() => !TAURI);
@@ -1208,6 +1216,7 @@ export default function App() {
   const artEl = (big = false) => <div className={`art ${big ? "big" : ""}`} style={{ backgroundImage: art ? `url("${art}")` : undefined }} />;
 
   const siri = mode === "listening";
+  const glowTint = ambient ? tint : "";
   // scale from the point where the island touches the screen edge, like a tree growing out of it
   const origin = edge === "top" ? "50% 0%" : edge === "bottom" ? "50% 100%" : edge === "left" ? "0% 50%" : "100% 50%";
   const box = { x, y, width: w, height: h, scale, transformOrigin: origin };
@@ -1215,8 +1224,8 @@ export default function App() {
   return (
     <div className={`stage ${dragging ? "dragging" : ""} ${fsHide ? "fsgone" : ""}`} style={{ ["--accent" as string]: tint ? `color-mix(in srgb, ${tint} 55%, white)` : "#fff" }}>
       <motion.div className="pan" style={{ x: panX, y: panY }}>
-      <motion.div className="glow" style={{ ...box, borderRadius: rad }} animate={{ opacity: placed ? (siri ? 0.35 : tint && media ? (mode === "expanded" ? 0.16 : 0.1) : 0) : 0 }} transition={{ duration: 0.6 }}>
-        <div className={`halo ${siri ? "siri" : ""}`} style={{ background: siri ? undefined : tint }} />
+      <motion.div className="glow" style={{ ...box, borderRadius: rad }} animate={{ opacity: placed ? (siri ? 0.35 : glowTint && media ? (mode === "expanded" ? 0.16 : 0.1) : 0) : 0 }} transition={{ duration: 0.6 }}>
+        <div className={`halo ${siri ? "siri" : ""}`} style={{ background: siri ? undefined : glowTint }} />
       </motion.div>
       <motion.div
         className="shell"
@@ -1399,6 +1408,13 @@ export default function App() {
                     <div className="seg" role="group" aria-label="Lock the island in place">
                       <button className={posLock ? "" : "on"} onClick={() => setPosLockPref(false)}>Off</button>
                       <button className={posLock ? "on" : ""} onClick={() => setPosLockPref(true)}>On</button>
+                    </div>
+                  </div>
+                  <div className="cfg">
+                    <span className="hint" title="Colour the glow around the island from the cover art">Ambient light</span>
+                    <div className="seg" role="group" aria-label="Ambient light around the island">
+                      <button className={ambient ? "" : "on"} onClick={() => setAmbientPref(false)}>Off</button>
+                      <button className={ambient ? "on" : ""} onClick={() => setAmbientPref(true)}>On</button>
                     </div>
                   </div>
                   <div className="cfg">
