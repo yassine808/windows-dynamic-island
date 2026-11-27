@@ -34,12 +34,15 @@ mod imp {
             Foundation::ERROR_SUCCESS,
             System::Registry::{
                 RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ,
-                RRF_RT_REG_SZ,
+                RRF_RT_REG_BINARY, RRF_RT_REG_SZ,
             },
         },
     };
 
     const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    /// Task Manager / Settings record a disabled startup entry here instead of deleting the Run
+    /// value. Reading only Run made the switch claim "on" for an app Windows will never start.
+    const APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
     const VALUE: &str = "IslandWin";
 
     pub fn current_exe() -> String {
@@ -72,9 +75,37 @@ mod imp {
         }
     }
 
-    pub fn enabled() -> bool { get().is_some() }
+    /// Missing or short value = enabled (that is what Windows itself assumes).
+    fn approved_enabled() -> bool {
+        let (sub, val) = (wide(APPROVED), wide(VALUE));
+        let mut size = 0u32;
+        unsafe {
+            let r = RegGetValueW(
+                HKEY_CURRENT_USER, PCWSTR(sub.as_ptr()), PCWSTR(val.as_ptr()), RRF_RT_REG_BINARY,
+                None, None, Some(&mut size),
+            );
+            if r != ERROR_SUCCESS || size == 0 || size > 64 { return true; }
+            let mut buf = [0u8; 64];
+            let mut got = size;
+            let r = RegGetValueW(
+                HKEY_CURRENT_USER, PCWSTR(sub.as_ptr()), PCWSTR(val.as_ptr()), RRF_RT_REG_BINARY,
+                None, Some(buf.as_mut_ptr() as *mut c_void), Some(&mut got),
+            );
+            if r != ERROR_SUCCESS || got == 0 { return true; }
+            // the first byte is even when the entry is enabled, odd when Task Manager disabled it
+            buf[0] % 2 == 0
+        }
+    }
+
+    fn clear_approved() {
+        let (sub, val) = (wide(APPROVED), wide(VALUE));
+        unsafe { let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, PCWSTR(sub.as_ptr()), PCWSTR(val.as_ptr())); }
+    }
+
+    pub fn enabled() -> bool { get().is_some() && approved_enabled() }
 
     pub fn write(exe: &str) -> Result<(), String> {
+        if exe.trim().is_empty() { return Err("cannot resolve the executable path".into()); }
         let (sub, val) = (wide(RUN), wide(VALUE));
         // quoted so a path with spaces still runs as one argument
         let cmd = format!("\"{}\"", exe);
@@ -98,7 +129,14 @@ mod imp {
     }
 
     pub fn set(on: bool) -> Result<(), String> {
-        if on { write(&current_exe()) } else { delete() }
+        if on {
+            write(&current_exe())?;
+            // absence of the approved blob means enabled; this undoes a Task Manager disable
+            clear_approved();
+            Ok(())
+        } else {
+            delete()
+        }
     }
 }
 
