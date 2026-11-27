@@ -1,13 +1,15 @@
 // Live system stats: CPU, RAM, network (sysinfo) and NVIDIA GPU (nvidia-smi, if present).
 use serde::Serialize;
 use std::{
-    process::Command,
+    io::Read,
+    path::PathBuf,
+    process::{Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{Networks, System};
 
@@ -33,14 +35,44 @@ fn watch() {
     if prev < now { logf!("stats", "samplers active (stats page open)"); }
 }
 
+/// Resolve the real nvidia-smi instead of letting `Command` search the current directory first
+/// (a user-writable directory earlier in the search order is a code-execution path).
+fn nvidia_smi() -> Option<PathBuf> {
+    [
+        std::env::var_os("ProgramFiles").map(|d| PathBuf::from(d).join("NVIDIA Corporation").join("NVSMI").join("nvidia-smi.exe")),
+        std::env::var_os("SystemRoot").map(|d| PathBuf::from(d).join("System32").join("nvidia-smi.exe")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|p| p.is_file())
+}
+
 fn gpu_util() -> Option<f32> {
-    let mut c = Command::new("nvidia-smi");
+    let mut c = Command::new(nvidia_smi()?);
     c.args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]);
     #[cfg(windows)]
     { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000); } // no console window flash
-    let o = c.output().ok()?;
-    if !o.status.success() { return None; }
-    String::from_utf8_lossy(&o.stdout).lines().next()?.trim().parse().ok()
+    c.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = c.spawn().ok()?;
+    // A wedged driver must not block the only GPU sampler forever: kill the child after 2 s.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() { return None; }
+                let mut out = String::new();
+                child.stdout.take()?.read_to_string(&mut out).ok()?;
+                return out.lines().next()?.trim().parse().ok();
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            _ => {
+                logf!("stats", "nvidia-smi did not answer within 2 s, killing it");
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 pub fn start() {
@@ -53,10 +85,15 @@ pub fn start() {
         let mut nets = Networks::new_with_refreshed_list();
         sys.refresh_cpu_usage();
         let mut active = false;
+        // Totals plus a timestamp give a true per-second rate. `received()` is a delta since the
+        // last refresh, so after the page was closed it covered the whole idle gap and the first
+        // frame showed hundreds of MB/s.
+        let mut prev: Option<(u64, u64, Instant)> = None;
         loop {
             thread::sleep(Duration::from_millis(1000));
             if !watched() {
                 active = false;
+                prev = None;
                 continue;
             }
             if !active {
@@ -70,13 +107,22 @@ pub fn start() {
             sys.refresh_memory();
             nets.refresh();
             let (mut d, mut u) = (0u64, 0u64);
-            for (_, n) in &nets { d += n.received(); u += n.transmitted(); }
+            for (_, n) in &nets { d += n.total_received(); u += n.total_transmitted(); }
+            let now = Instant::now();
+            let (down, up) = match prev {
+                Some((pd, pu, pt)) => {
+                    let secs = now.duration_since(pt).as_secs_f64().max(0.001);
+                    ((d.saturating_sub(pd)) as f64 / secs, (u.saturating_sub(pu)) as f64 / secs)
+                }
+                None => (0.0, 0.0),
+            };
+            prev = Some((d, u, now));
             let total = sys.total_memory().max(1) as f32;
             let mut s = STATS.lock().unwrap();
             s.cpu = sys.global_cpu_info().cpu_usage();
             s.ram = sys.used_memory() as f32 / total * 100.0;
-            s.down = d as f64;
-            s.up = u as f64;
+            s.down = down;
+            s.up = up;
         }
     });
     thread::spawn(|| {
