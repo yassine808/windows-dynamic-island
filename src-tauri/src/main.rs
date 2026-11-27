@@ -48,6 +48,19 @@ fn place_box(win: &tauri::WebviewWindow, b: [f64; 4], org: (i32, i32, f64)) {
     let _ = win.set_position(PhysicalPosition::new(px, py));
 }
 
+/// The window's current DPI. Tauri's cached `scale_factor()` only updates when the window
+/// processes WM_DPICHANGED, which can lag a monitor switch by seconds (or never arrive while the
+/// window is click-through). Asking Win32 directly keeps the island crisp when it is dragged
+/// between monitors with different scaling.
+#[cfg(windows)]
+fn window_scale(hwnd: isize) -> Option<f64> {
+    use windows::Win32::{Foundation::HWND, UI::HiDpi::GetDpiForWindow};
+    let dpi = unsafe { GetDpiForWindow(HWND(hwnd as _)) };
+    (dpi > 0).then(|| dpi as f64 / 96.0)
+}
+#[cfg(not(windows))]
+fn window_scale(_: isize) -> Option<f64> { None }
+
 fn box_size(scale: f64) -> PhysicalSize<u32> {
     PhysicalSize::new((BOX_W * scale).round().max(1.0) as u32, (BOX_H * scale).round().max(1.0) as u32)
 }
@@ -95,6 +108,7 @@ fn fullscreen_rect(maximized: bool, framed: bool, visible: windows::Win32::Found
 
 #[cfg(windows)]
 fn fullscreen_app(own: isize) -> bool {
+    use std::sync::Mutex;
     use windows::Win32::{
         Foundation::{HWND, RECT},
         Graphics::{
@@ -106,6 +120,10 @@ fn fullscreen_app(own: isize) -> bool {
             IsIconic, IsWindowVisible, GWL_STYLE, SW_SHOWMAXIMIZED, WINDOWPLACEMENT, WS_CAPTION,
         },
     };
+    // Probing four times a second costs a DWM round trip plus a monitor lookup. Cache the answer
+    // per foreground window, its maximize/frame state and its rectangle: a borderless window that
+    // grows to fullscreen keeps the same HWND and style, so the rect is what invalidates the entry.
+    static CACHE: Mutex<Option<((isize, bool, bool, i32, i32, i32, i32), bool)>> = Mutex::new(None);
     unsafe {
         let fg: HWND = GetForegroundWindow();
         if fg.0.is_null() || fg.0 as isize == own || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() { return false; }
@@ -119,12 +137,19 @@ fn fullscreen_app(own: isize) -> bool {
         let maximized = GetWindowPlacement(fg, &mut wp).is_ok() && wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
         let framed = (GetWindowLongW(fg, GWL_STYLE) as u32) & WS_CAPTION.0 != 0;
         let mut r = RECT::default();
+        if GetWindowRect(fg, &mut r).is_err() { return false; }
+        let key = (fg.0 as isize, maximized, framed, r.left, r.top, r.right, r.bottom);
+        if let Ok(c) = CACHE.lock() {
+            if let Some((k, v)) = *c { if k == key { return v; } }
+        }
         if DwmGetWindowAttribute(fg, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut _ as *mut _, std::mem::size_of::<RECT>() as u32).is_err() {
-            if GetWindowRect(fg, &mut r).is_err() { return false; }
+            // keep the GetWindowRect value already in `r`
         }
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        if !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() { return false; }
-        fullscreen_rect(maximized, framed, r, mi.rcMonitor)
+        let result = GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool()
+            && fullscreen_rect(maximized, framed, r, mi.rcMonitor);
+        if let Ok(mut c) = CACHE.lock() { *c = Some((key, result)); }
+        result
     }
 }
 // Is the system cursor currently visible? (Games hide it during gameplay and show it in menus.)
@@ -172,14 +197,14 @@ fn already_running() -> bool { false }
 /// Union of every monitor in physical px, plus the same list in the webview's CSS px (primary
 /// first). Recomputed on a timer so a resolution switch or a Parsec / remote display changes the
 /// overlay with the desktop instead of leaving it at the old size and position.
-fn layout_of(win: &tauri::WebviewWindow) -> tauri::Result<(i32, i32, u32, u32, f64, Vec<[f64; 4]>)> {
+fn layout_of(win: &tauri::WebviewWindow, scale: Option<f64>) -> tauri::Result<(i32, i32, u32, u32, f64, Vec<[f64; 4]>)> {
     let mons = win.available_monitors()?;
     let prim = win.primary_monitor()?.map(|m| (m.position().x, m.position().y));
     let minx = mons.iter().map(|m| m.position().x).min().unwrap_or(0);
     let miny = mons.iter().map(|m| m.position().y).min().unwrap_or(0);
     let maxx = mons.iter().map(|m| m.position().x + m.size().width as i32).max().unwrap_or(1920);
     let maxy = mons.iter().map(|m| m.position().y + m.size().height as i32).max().unwrap_or(1080);
-    let scale = win.scale_factor().unwrap_or(1.0);
+    let scale = scale.or_else(|| win.scale_factor().ok()).unwrap_or(1.0);
     let mut list: Vec<([f64; 4], bool)> = mons.iter().map(|m| (
         [(m.position().x - minx) as f64 / scale, (m.position().y - miny) as f64 / scale,
          m.size().width as f64 / scale, m.size().height as f64 / scale],
@@ -196,14 +221,15 @@ fn set_hit_rect(st: State<Shared>, x: f64, y: f64, w: f64, h: f64) { st.lock().u
 /// glow and drag shadow. Everything outside it is not part of the window at all.
 #[tauri::command]
 fn set_box(win: tauri::WebviewWindow, st: State<Shared>, x: f64, y: f64, w: f64, h: f64) {
-    let (org, first) = {
-        let mut g = st.lock().unwrap();
-        let first = g.box_.is_none();
-        g.box_ = Some([x, y, w, h]);
-        (g.org, first)
-    };
+    let mut g = st.lock().unwrap();
+    let first = g.box_.is_none();
+    g.box_ = Some([x, y, w, h]);
+    // Place while still holding the lock: the layout thread updates `org` and re-places the same
+    // box under the same lock, so reading it outside let a display change land between the two
+    // and move the overlay to the old monitor.
+    place_box(&win, [x, y, w, h], g.org);
+    drop(g);
     if first { logf!("win", "island box {x:.0},{y:.0} {w:.0}x{h:.0}"); }
-    place_box(&win, [x, y, w, h], org);
 }
 
 #[tauri::command]
@@ -237,13 +263,15 @@ fn set_cursor(hand: bool) {
 }
 
 fn main() {
-    paths::migrate();
-    logger::init();
-    logf!("boot", "data folder: {}", paths::data_dir().display());
+    // Check for a second copy before touching the log: both instances would open the same file,
+    // and the losing one would rotate/truncate the winner's history on its way out.
     if already_running() {
-        logf!("boot", "another islandwin instance is already running, exiting");
         return;
     }
+    let migration = paths::migrate();
+    logger::init();
+    logf!("boot", "data folder: {}", paths::data_dir().display());
+    for line in migration { logf!("paths", "{line}"); }
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::force_capture();
         logf!("panic", "{info}\n{bt}");
@@ -260,7 +288,7 @@ fn main() {
         })
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
-            media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_box, set_dragging, set_cursor, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
+            media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_box, set_dragging, set_cursor, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle, stt::stt_stop,
             stt::stt_engine, stt::stt_ended, stt::stt_type,
             hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::record_submit, hotkey::cancel_record_shortcut, hotkey::reset_shortcut,
 autostart::autostart_get, autostart::autostart_set,
@@ -284,7 +312,7 @@ autostart::autostart_get, autostart::autostart_set,
             // re-read on a timer below, because a resolution switch or a Parsec / remote display
             // changes the monitor union while the app is running.
             let win = app.get_webview_window("main").unwrap();
-            let (minx, miny, ow, oh, scale, list) = layout_of(&win)?;
+            let (minx, miny, ow, oh, scale, list) = layout_of(&win, None)?;
             for m in &list {
                 logf!("win", "monitor {}x{} at {},{}", m[2], m[3], m[0], m[1]);
             }
@@ -334,25 +362,38 @@ autostart::autostart_get, autostart::autostart_set,
                     // Parsec / remote display connecting or disconnecting. Re-read it and move the
                     // overlay with the desktop; the UI gets the new monitor list and re-places the
                     // island, so it never stays at the old screen's coordinates.
+                    // A DPI change (dragging to a differently scaled monitor) may never reach
+                    // Tauri's cache; poll Win32 every tick and force the layout pass immediately.
+                    if let Some(s) = window_scale(hwnd) {
+                        if (s - scale).abs() > 0.01 { next_layout = now; }
+                    }
                     if now >= next_layout {
                         next_layout = now + Duration::from_secs(2);
-                        if let Ok((nx, ny, nw, nh, ns, nl)) = layout_of(&winc) {
+                        if let Ok((nx, ny, nw, nh, ns, nl)) = layout_of(&winc, window_scale(hwnd)) {
                             if (nx, ny, nw, nh, ns) != geo || nl != css {
                                 geo = (nx, ny, nw, nh, ns);
                                 ox = nx as f64;
                                 oy = ny as f64;
                                 scale = ns;
                                 css = nl.clone();
-                                let bx = {
-                                    let mut g = shared.lock().unwrap();
-                                    g.mons = nl.clone();
-                                    g.org = (nx, ny, ns);
-                                    g.box_
-                                };
                                 // The desktop moved under the island: the same box is now at a
                                 // different physical position, and a new scale means a new size.
                                 let _ = winc.set_size(box_size(ns));
-                                if let Some(b) = bx { place_box(&winc, b, (nx, ny, ns)); }
+                                // Update the state under the lock, then place the *current* box on
+                                // the main thread: SetWindowPos on a window owned by another thread
+                                // blocks until that thread pumps, so calling it here while holding
+                                // the lock could deadlock with set_box. The main thread also runs
+                                // set_box, so the two placements can never race or go stale.
+                                {
+                                    let mut g = shared.lock().unwrap();
+                                    g.mons = nl.clone();
+                                    g.org = (nx, ny, ns);
+                                }
+                                let (st, w) = (shared.clone(), winc.clone());
+                                let _ = app.run_on_main_thread(move || {
+                                    let g = st.lock().unwrap();
+                                    if let Some(b) = g.box_ { place_box(&w, b, g.org); }
+                                });
                                 let _ = app.emit("mons", nl);
                                 logf!("win", "display change: desktop {nw}x{nh} at {nx},{ny} scale {ns:.2}");
                             }
@@ -403,10 +444,11 @@ autostart::autostart_get, autostart::autostart_set,
                     let (x, y) = (px / scale, py / scale);
                     let down = lbutton();
                     let (r, dragging) = { let g = shared.lock().unwrap(); (g.r, g.dragging) };
-                    let pad = 10.0;
-                    let inside = r[2] > 0.0 && x >= r[0] - pad && x <= r[0] + r[2] + pad && y >= r[1] - pad && y <= r[1] + r[3] + pad;
-                    // Over the island the window takes the mouse, so clicks never reach what's behind it.
-                    let over = r[2] > 0.0 && x >= r[0] - 1.0 && x <= r[0] + r[2] + 1.0 && y >= r[1] - 1.0 && y <= r[1] + r[3] + 1.0;
+                    // One rectangle for both hover routing and mouse capture, with the same 1 px
+                    // tolerance for DPI rounding: a 10 px hover pad but a 1 px capture pad made the
+                    // island light up outside the area that actually received clicks.
+                    let inside = r[2] > 0.0 && x >= r[0] - 1.0 && x <= r[0] + r[2] + 1.0 && y >= r[1] - 1.0 && y <= r[1] + r[3] + 1.0;
+                    let over = inside;
                     let want = over || dragging;
                     if want != interactive {
                         interactive = want;

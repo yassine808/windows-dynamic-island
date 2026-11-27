@@ -20,7 +20,7 @@ pub fn data_dir() -> PathBuf {
     appdata().join(NAME)
 }
 
-fn copy_once(from: &Path, to: &Path) {
+fn copy_once(from: &Path, to: &Path, log: &mut Vec<String>) {
     if !from.is_file() || to.exists() {
         return;
     }
@@ -28,25 +28,28 @@ fn copy_once(from: &Path, to: &Path) {
         let _ = fs::create_dir_all(dir);
     }
     if let Err(e) = fs::copy(from, to) {
-        logf!("paths", "could not copy {} -> {}: {e}", from.display(), to.display());
+        log.push(format!("could not copy {} -> {}: {e}", from.display(), to.display()));
     } else {
-        logf!("paths", "migrated {} -> {}", from.display(), to.display());
+        log.push(format!("migrated {} -> {}", from.display(), to.display()));
     }
 }
 
 /// Carry the old settings and log over once. The old folder is left in place: a downgrade or a
-/// second look at the history never loses anything.
-pub fn migrate() {
+/// second look at the history never loses anything. Returns the lines to log after the logger is
+/// open (the migration runs before logger::init, so logging here would only reach stdout).
+pub fn migrate() -> Vec<String> {
+    let mut log = Vec::new();
     let new = data_dir();
     let old = appdata().join(OLD);
     if old.is_dir() {
-        copy_once(&old.join("settings.json"), &new.join("settings.json"));
-        copy_once(&old.join("logs").join("islandwin.log"), &new.join("logs").join("islandwin.log"));
+        copy_once(&old.join("settings.json"), &new.join("settings.json"), &mut log);
+        copy_once(&old.join("logs").join("islandwin.log"), &new.join("logs").join("islandwin.log"), &mut log);
     }
     // 0.1.0's predecessor kept the log inside the per-user install folder.
     if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-        copy_once(&local.join("islandwin").join("islandwin.log"), &new.join("logs").join("islandwin.log"));
+        copy_once(&local.join("islandwin").join("islandwin.log"), &new.join("logs").join("islandwin.log"), &mut log);
     }
+    log
 }
 
 #[cfg(test)]
