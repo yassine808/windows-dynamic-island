@@ -8,7 +8,7 @@ type Media = { title: string; artist: string; playing: boolean; position: number
 type Stt = { active: boolean; partial: string; text: string; err: string };
 type Mode = "idle" | "media" | "listening" | "alarm" | "expanded" | "timer";
 type Tm = { total: number; left: number; end: number; running: boolean; done: boolean };
-type Mix = { vol: number; mute: boolean; mic: number; mic_mute: boolean; ok: boolean };
+type Mix = { vol: number; mute: boolean; mic: number; mic_mute: boolean; ok: boolean; mic_ok: boolean };
 type St = { cpu: number; ram: number; gpu: number; down: number; up: number };
 type MicInfo = { engine: boolean; perm: string };
 const PAGES = 6; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 settings
@@ -120,8 +120,11 @@ function useMedia() {
       invoke<ArtReply | null>("media_art", { key: k })
         .then((r) => {
           if (ag !== artGen.current) return;
+          // A reply for this exact song always wins: an empty `art` means "this track has no
+          // cover", so stop asking. Only a null reply (the player switched songs mid-read) is
+          // retried, with a growing delay so a player that never answers is not hammered.
           if (r && r.key === k) { setArt(r.art); return; }
-          if (tries < 3) window.setTimeout(() => loadArt(tries + 1), 250);
+          if (tries < 3) window.setTimeout(() => loadArt(tries + 1), [300, 900, 2000][tries]);
         })
         .catch(() => {});
     };
@@ -166,9 +169,11 @@ function useMedia() {
 function useTint(art: string | null) {
   const [tint, setTint] = useState("");
   useEffect(() => {
-    if (!art) return setTint("");
+    if (!art) { setTint(""); return; }
+    let live = true;
     const i = new Image();
     i.onload = () => {
+      if (!live) return; // a newer cover replaced this one while it decoded
       const c = document.createElement("canvas");
       c.width = c.height = 8;
       const x = c.getContext("2d")!;
@@ -183,6 +188,7 @@ function useTint(art: string | null) {
       setTint(`rgb(${(r / n) | 0},${(g / n) | 0},${(b / n) | 0})`);
     };
     i.src = art;
+    return () => { live = false; };
   }, [art]);
   return tint;
 }
@@ -256,7 +262,8 @@ function useStt() {
     }));
     return () => { alive = false; gone = true; rec.abort(); offs.forEach((f) => f()); };
   }, []);
-  // Windows recognizer fallback: polled only while the browser engine is not in charge.
+  // Windows recognizer fallback: a slow poll recovers from a missed event. State changes are pushed
+  // on `stt://state`, so this does not need to run ten times a second.
   useEffect(() => {
     if (!TAURI) return;
     let busy = false;
@@ -269,7 +276,7 @@ function useStt() {
         if (k !== last.current) { last.current = k; setStt(s); }
       } catch {}
       busy = false;
-    }, 100);
+    }, 1000);
     return () => clearInterval(id);
   }, []);
   return { stt, setStt, mic };
@@ -277,9 +284,12 @@ function useStt() {
 
 function useMic(active: boolean, level: MotionValue<number>) {
   useEffect(() => {
-    if (!active) return level.set(0);
-    let raf = 0, stream: MediaStream | undefined, ctx: AudioContext | undefined;
+    if (!active) { level.set(0); return; }
+    let cancelled = false, raf = 0, stream: MediaStream | undefined, ctx: AudioContext | undefined;
     navigator.mediaDevices.getUserMedia({ audio: true }).then((s) => {
+      // The session can end while the permission prompt is still open. Without this the stream
+      // would stay live (microphone light on) with nothing left to stop it.
+      if (cancelled) { s.getTracks().forEach((t) => t.stop()); return; }
       stream = s;
       ctx = new AudioContext();
       const an = ctx.createAnalyser();
@@ -295,7 +305,7 @@ function useMic(active: boolean, level: MotionValue<number>) {
       };
       loop();
     }).catch(() => {});
-    return () => { cancelAnimationFrame(raf); stream?.getTracks().forEach((t) => t.stop()); ctx?.close(); };
+    return () => { cancelled = true; cancelAnimationFrame(raf); stream?.getTracks().forEach((t) => t.stop()); ctx?.close(); };
   }, [active]);
 }
 
@@ -622,7 +632,8 @@ export default function App() {
   }, [pin]);
 
   // ---- mixer / stats state ----
-  const [mix, setMix] = useState<Mix>({ vol: 0.5, mute: false, mic: 0.8, mic_mute: false, ok: true });
+  const [mix, setMix] = useState<Mix>({ vol: 0.5, mute: false, mic: 0.8, mic_mute: false, ok: true, mic_ok: true });
+  const [mixErr, setMixErr] = useState("");
   const [slOn, setSlOn] = useState<string | null>(null);
   const [st, setSt] = useState<St>({ cpu: 0, ram: 0, gpu: -1, down: 0, up: 0 });
   const mixFreeze = useRef(0);
@@ -633,12 +644,15 @@ export default function App() {
     mixFreeze.current = now + 800;
     setMix((m) => ({ ...m, [id]: f, ...(f > 0 ? { [id === "vol" ? "mute" : "mic_mute"]: false } : {}) }));
     setSlOn(commit ? null : id);
-    if (commit || now - (sendT.current[id] ?? 0) > 40) { sendT.current[id] = now; call("mixer_set_vol", { mic: id === "mic", v: f }); }
+    if (commit || now - (sendT.current[id] ?? 0) > 40) {
+      sendT.current[id] = now;
+      call("mixer_set_vol", { mic: id === "mic", v: f }).then(() => setMixErr("")).catch((e) => setMixErr(`Volume: ${String(e)}`));
+    }
   };
   const muteSet = (mic: boolean, on: boolean) => {
     mixFreeze.current = performance.now() + 800;
     setMix((m) => ({ ...m, [mic ? "mic_mute" : "mute"]: on }));
-    call("mixer_set_mute", { mic, on });
+    call("mixer_set_mute", { mic, on }).then(() => setMixErr("")).catch((e) => setMixErr(`Mute: ${String(e)}`));
   };
   const mediaRef = useRef(media);
   mediaRef.current = media;
@@ -840,7 +854,18 @@ export default function App() {
     let on = true;
     const f = async () => {
       if (!TAURI || performance.now() < mixFreeze.current) return;
-      try { const m = await invoke<Mix>("mixer_get"); if (on && m.ok) setMix(m); } catch {}
+      try {
+        const m = await invoke<Mix>("mixer_get");
+        // Update each endpoint independently: a missing speaker must not freeze the mic readout
+        // (and vice versa).
+        if (on) setMix((prev) => ({
+          ...prev,
+          ...(m.ok ? { vol: m.vol, mute: m.mute } : {}),
+          ...(m.mic_ok ? { mic: m.mic, mic_mute: m.mic_mute } : {}),
+          ok: m.ok,
+          mic_ok: m.mic_ok,
+        }));
+      } catch {}
     };
     f();
     const id = setInterval(f, 500);
@@ -1062,9 +1087,21 @@ export default function App() {
     if (!TAURI) return;
     let active = false, btn: HTMLElement | null = null, sk: DOMRect | null = null, skId: string | undefined;
     let held = false; // the dictation mic is being held down in Hold mode
+    let heldStarted = false; // this press actually started the session (it may not be active in state yet)
     let hand = false; // last cursor shape we pushed to the OS
     const frac = (p: P) => (sk ? (p.x - orgRef.current.x - sk.left) / sk.width : 0);
     const onPtr = (p: P) => {
+      // Rust parks the pointer far off-screen when a fullscreen app takes the mouse. That event is
+      // not a release: committing a scrub there seeked the track to 0, and a drag jumped the island.
+      if (p.x < -1e5 || p.y < -1e5) {
+        setHover(false);
+        if (!active) return;
+        active = false;
+        if (held) { held = false; if (heldStarted) { heldStarted = false; call("stt_stop"); } }
+        btn?.classList.remove("pressed");
+        btn = null; sk = null; skId = undefined;
+        return;
+      }
       // Pointer coordinates are desktop coordinates; element hit-testing and DOM rects are window
       // coordinates, which start at the overlay's top-left corner.
       const vx = p.x - orgRef.current.x, vy = p.y - orgRef.current.y;
@@ -1086,7 +1123,7 @@ export default function App() {
           // Hold mode: the mic button is push-to-talk, exactly like the global shortcut
           if (holdRef.current && btn.dataset.dict === "1") {
             held = true;
-            if (!sttRef.current.active) call("stt_toggle");
+            if (!sttRef.current.active) { call("stt_toggle"); heldStarted = true; }
           }
         } else f.pdown(p.x, p.y);
       } else if (p.down && active) {
@@ -1097,7 +1134,9 @@ export default function App() {
         if (sk) { seekFn.current(frac(p), true, skId); sk = null; skId = undefined; }
         else if (btn) {
           btn.classList.remove("pressed");
-          if (held) { held = false; if (sttRef.current.active) call("stt_toggle"); }
+          // Pair the release with the press: checking `stt.active` here raced the state update,
+          // so a short press could leave the microphone open.
+          if (held) { held = false; if (heldStarted) { heldStarted = false; call("stt_stop"); } }
           else if (document.elementFromPoint(vx, vy)?.closest("button") === btn) btn.click();
           btn = null;
         } else f.pup();
@@ -1307,6 +1346,7 @@ export default function App() {
                     <span className="pct">{Math.round((m ? 0 : v) * 100)}</span>
                   </div>
                 ))}
+                {mixErr && <div className="artist err" style={{ marginTop: 6 }}>{mixErr}</div>}
               </motion.div>
             )}
             {mode === "expanded" && page === 4 && (

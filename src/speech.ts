@@ -14,8 +14,10 @@ export type SpeechHandlers = {
 export const speechAvailable = () =>
   typeof window !== "undefined" && !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
 
-// these never recover on their own; no-speech and aborted are normal during hold-to-talk
-const FATAL = new Set(["not-allowed", "service-not-allowed", "network", "audio-capture", "language-not-supported"]);
+// These never recover on their own: the permission was refused or the language is unsupported.
+// `network` and `audio-capture` are transient (a service hiccup, a device briefly busy), so they
+// must not kill the engine and drop the user into the slower Windows recognizer for the session.
+const FATAL = new Set(["not-allowed", "service-not-allowed", "language-not-supported"]);
 
 function hint(code: string) {
   if (code === "not-allowed" || code === "service-not-allowed") return "Microphone blocked, using Windows speech";
@@ -38,6 +40,7 @@ export function createSpeech(h: SpeechHandlers) {
   let restarts = 0;
   let startedAt = 0;
   let flapping = 0; // sessions that die within 400 ms of starting
+  let stopTimer = 0; // fires `end` if a stop never produces an onend
   // the log timestamps are enough to time a session; these only keep it to one "first words" line
   let firstWord = false;
 
@@ -73,6 +76,7 @@ export function createSpeech(h: SpeechHandlers) {
   // Chromium ends the session on its own after long silence; restart while the user still holds on.
   rec.onend = () => {
     started = false;
+    if (stopTimer) { clearTimeout(stopTimer); stopTimer = 0; }
     if (dead || !want) return h.end();
     // a service that closes right after opening will never produce words: give up and fall back
     flapping = startedAt && performance.now() - startedAt < 400 ? flapping + 1 : 0;
@@ -93,16 +97,26 @@ export function createSpeech(h: SpeechHandlers) {
       if (dead) return;
       want = true;
       firstWord = false;
+      // A new press is a fresh budget: the lifetime cap must not make dictation stop working after
+      // 40 restarts in an earlier session.
+      restarts = 0;
+      flapping = 0;
+      if (stopTimer) { clearTimeout(stopTimer); stopTimer = 0; }
       if (started) return;
       try { rec.start(); started = true; } catch {}
     },
     stop() {
       want = false;
       try { rec.stop(); } catch {}
+      // If the engine was never really running (or its onend is lost), Rust would stay "listening"
+      // forever. Report the end ourselves after a grace period; h.end is idempotent.
+      if (stopTimer) clearTimeout(stopTimer);
+      stopTimer = window.setTimeout(() => { stopTimer = 0; if (!want) h.end(); }, 1500);
     },
     abort() {
       want = false;
       dead = true;
+      if (stopTimer) { clearTimeout(stopTimer); stopTimer = 0; }
       try { rec.abort(); } catch {}
     },
   };
