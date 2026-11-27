@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Write,
     path::PathBuf,
     sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock},
 };
@@ -33,7 +34,28 @@ fn save(s: &Settings) {
     *CUR.lock().unwrap() = Some(s.clone());
     let p = path();
     if let Some(d) = p.parent() { let _ = fs::create_dir_all(d); }
-    let _ = fs::write(&p, serde_json::to_string_pretty(s).unwrap_or_default());
+    // Write a sibling temp file and rename it over the real one: a crash, a power cut or a full
+    // disk can never leave settings.json half written and silently reset the user's shortcut.
+    let tmp = p.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(s).unwrap_or_default();
+    let res = (|| -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, &p)
+    })();
+    if let Err(e) = res {
+        logf!("hotkey", "could not save {}: {e}", p.display());
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// Keys people type or navigate with. A bare one would make the global hook swallow that key in
+/// every application (Space is one accidental click away in the recorder), so it needs a modifier.
+fn typing_key(vk: u16) -> bool {
+    matches!(vk,
+        0x08 | 0x09 | 0x0C | 0x0D | 0x14 | 0x1B | 0x20 | 0x21..=0x2E | 0x30..=0x39 | 0x41..=0x5A
+        | 0x60..=0x69 | 0x90 | 0x91 | 0xBA..=0xC0 | 0xDB..=0xDE | 0xE2)
 }
 
 /// One thing the user can press: a keyboard virtual-key or a mouse button. Mouse 0x01 (left) is
@@ -87,6 +109,14 @@ impl Combo {
             }
         }
         let key = key.ok_or_else(|| "Press a key, not only a modifier".to_string())?;
+        if !ctrl && !alt && !shift && !sup {
+            if let Key::Keyboard(vk) = key {
+                if typing_key(vk) {
+                    let name = imp::name(vk).unwrap_or_else(|| format!("Vk{vk:02X}"));
+                    return Err(format!("{name} needs Ctrl, Alt, Shift or Super, otherwise it would be swallowed in every app"));
+                }
+            }
+        }
         Ok(Combo { ctrl, alt, shift, sup, key })
     }
 
@@ -136,6 +166,9 @@ pub fn stt_settings() -> Settings { get() }
 pub fn set_stt_hold(hold: bool) {
     logf!("hotkey", "hold mode -> {hold}");
     crate::stt::HOLD.store(hold, Ordering::Relaxed);
+    // Serialise with record_shortcut's commit: both are read-modify-write of the same file, and a
+    // Hold toggle made while the recorder waits must not be overwritten by the captured shortcut.
+    let _commit = COMMIT.lock().unwrap();
     let mut s = get();
     s.hold = hold;
     save(&s);
@@ -180,6 +213,12 @@ pub async fn record_shortcut(app: AppHandle) -> Result<String, String> {
         return Err("Already recording a shortcut".into());
     }
     let old = get();
+    // Recording takes the keyboard away from the app that was being dictated into; never leave the
+    // microphone open while the user is pressing a new shortcut.
+    if crate::stt::is_active() {
+        logf!("hotkey", "recording a shortcut while dictating: stopping dictation first");
+        crate::stt::stop();
+    }
     CANCEL.store(false, Ordering::Relaxed);
     *PENDING.lock().unwrap() = None;
     logf!("hotkey", "recording a new shortcut (current {:?})", old.shortcut);
@@ -200,7 +239,11 @@ pub async fn record_shortcut(app: AppHandle) -> Result<String, String> {
                 logf!("hotkey", "record: cancelled before saving {k}");
                 return Err("cancelled".into());
             }
-            save(&Settings { shortcut: k.clone(), hold: old.hold });
+            // Re-read at commit: Hold may have been toggled during the (up to 30 s) capture, and
+            // writing the pre-recording snapshot would silently revert it.
+            let mut s = get();
+            s.shortcut = k.clone();
+            save(&s);
             logf!("hotkey", "shortcut saved: {k}");
             Ok(k)
         }
@@ -228,12 +271,13 @@ mod imp {
         UI::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus},
             WindowsAndMessaging::{
-                CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
-                PeekMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowsHookExW,
-                TranslateMessage, UnhookWindowsHookEx, GWL_EXSTYLE, KBDLLHOOKSTRUCT, LLKHF_UP,
-                MSG, MSLLHOOKSTRUCT, PM_REMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
-                WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-                WM_XBUTTONDOWN, WM_XBUTTONUP, WS_EX_NOACTIVATE,
+                CallNextHookEx, DispatchMessageW, FindWindowExW, GetForegroundWindow, GetMessageW,
+                GetWindowLongPtrW, MsgWaitForMultipleObjectsEx, PeekMessageW, SetForegroundWindow,
+                SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+                GWL_EXSTYLE, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, MSG, MSLLHOOKSTRUCT,
+                MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WH_KEYBOARD_LL, WH_MOUSE_LL,
+                WM_KEYDOWN, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP,
+                WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, WS_EX_NOACTIVATE,
             },
         },
     };
@@ -291,8 +335,25 @@ mod imp {
     #[cfg(test)]
     pub(super) use name as key_name;
 
+    /// NumLock off turns the numpad digits into arrows/Home/End/Clear. The scan code and the
+    /// extended flag still identify the physical key, so normalize back to the numpad virtual key:
+    /// a Numpad4 shortcut keeps firing after NumLock is toggled, and a real ArrowLeft shortcut is
+    /// no longer triggered by numpad 4.
+    fn numpad_vk(scan: u32, extended: bool) -> Option<u16> {
+        if extended { return None; }
+        Some(match scan {
+            0x47 => 0x60, 0x48 => 0x61, 0x49 => 0x62, 0x4A => 0x63, 0x4B => 0x64,
+            0x4C => 0x65, 0x4D => 0x66, 0x4E => 0x67, 0x4F => 0x68, 0x50 => 0x69,
+            0x52 => 0x60, 0x53 => 0x6E,
+            _ => return None,
+        })
+    }
+
     fn mods() -> (bool, bool, bool, bool) {
-        (down(0x11) || down(0xA2) || down(0xA3), down(0x12), down(0x10), down(0x5B) || down(0x5C))
+        // AltGr is reported as LCtrl + RAlt. Counting the right Alt as a real Alt made the default
+        // Ctrl+Alt+Space eat AltGr+Space (a non-breaking space on many layouts) system-wide.
+        let altgr = down(0xA5) && down(0xA2);
+        (down(0x11) || down(0xA2) || down(0xA3), down(0x12) && !altgr, down(0x10), down(0x5B) || down(0x5C))
     }
 
     fn mods_match(c: &Combo) -> bool {
@@ -321,7 +382,9 @@ mod imp {
     unsafe extern "system" fn record_keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if code >= 0 && (w.0 as u32 == WM_KEYDOWN || w.0 as u32 == WM_SYSKEYDOWN) {
             let kb = &*(l.0 as *const KBDLLHOOKSTRUCT);
-            let vk = kb.vkCode as u16;
+            let raw = kb.vkCode as u16;
+            let extended = (kb.flags.0 & LLKHF_EXTENDED.0) != 0;
+            let vk = numpad_vk(kb.scanCode as u32, extended).unwrap_or(raw);
             if !modifier(vk) && kb.dwExtraInfo != OURS {
                 if let Ok(mut h) = HIT.lock() {
                     if h.is_none() {
@@ -377,17 +440,29 @@ mod imp {
         let hwnd = crate::OVERLAY.load(Ordering::Relaxed);
         if hwnd == 0 { return (0, 0, 0); }
         // the overlay is normally WS_EX_NOACTIVATE; make it activatable for the recording only,
-        // so keystrokes land in our own window instead of the app underneath
+        // so keystrokes land in our own window instead of the app underneath.
         let h = HWND(hwnd as _);
         let (prev, ex) = unsafe {
             let prev = GetForegroundWindow();
             let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+            // style changes work from any thread of the owning process
             SetWindowLongPtrW(h, GWL_EXSTYLE, ex & !(WS_EX_NOACTIVATE.0 as isize));
-            let _ = SetForegroundWindow(h);
-            let _ = SetFocus(h);
             (prev, ex)
         };
-        if let Some(w) = tauri::Manager::get_webview_window(app, "main") { let _ = w.set_focus(); }
+        // SetFocus only works on the thread that owns the window, so marshal it. Focusing the
+        // WebView2 child is what actually delivers keys to the DOM while the foreground app is
+        // elevated and the low-level hook sees nothing.
+        let app = app.clone();
+        let inner = app.clone();
+        let _ = app.run_on_main_thread(move || unsafe {
+            use windows::core::w;
+            let h = HWND(hwnd as _);
+            let _ = SetForegroundWindow(h);
+            let child = FindWindowExW(h, None, w!("Chrome_WidgetWin_1"), None).unwrap_or_default();
+            let target = if child.0.is_null() { h } else { child };
+            let _ = SetFocus(target);
+            if let Some(w) = tauri::Manager::get_webview_window(&inner, "main") { let _ = w.set_focus(); }
+        });
         (hwnd, ex, prev.0 as isize)
     }
 
@@ -398,6 +473,12 @@ mod imp {
             SetWindowLongPtrW(HWND(hwnd as _), GWL_EXSTYLE, ex);
             if prev != 0 { let _ = SetForegroundWindow(HWND(prev as _)); }
         }
+    }
+
+    /// Block until input arrives (or the timeout). A low-level hook is only called while its thread
+    /// pumps messages, so an unconditional sleep delayed every key and mouse move system-wide.
+    fn wait_input(ms: u32) {
+        unsafe { let _ = MsgWaitForMultipleObjectsEx(None, ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE); }
     }
 
     pub fn record(cancel: &std::sync::atomic::AtomicBool, pending: &Mutex<Option<String>>) -> Result<String, String> {
@@ -427,7 +508,7 @@ mod imp {
                     // would fire dictation the moment recording stops
                     let t = Instant::now();
                     while !released(combo.key) && t.elapsed() < Duration::from_secs(3) {
-                        sleep(Duration::from_millis(10));
+                        wait_input(10);
                     }
                     sleep(Duration::from_millis(120));
                     picked = Some(Ok(k));
@@ -436,7 +517,7 @@ mod imp {
             }
             let hit = HIT.lock().unwrap().take();
             let Some(k) = hit.or_else(|| poll().and_then(combo_for)) else {
-                sleep(Duration::from_millis(8));
+                wait_input(8);
                 continue;
             };
             let Ok(combo) = Combo::parse(&k) else {
@@ -447,7 +528,7 @@ mod imp {
             logf!("hotkey", "record: captured {}", combo.label());
             // let go of the combo before it goes live, so it does not fire the moment recording stops
             let t = Instant::now();
-            while !released(combo.key) && t.elapsed() < Duration::from_secs(3) { sleep(Duration::from_millis(10)); }
+            while !released(combo.key) && t.elapsed() < Duration::from_secs(3) { wait_input(10); }
             picked = Some(Ok(combo.label()));
             break;
         }
@@ -494,8 +575,10 @@ mod imp {
     unsafe extern "system" fn trigger_keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if code >= 0 {
             let kb = &*(l.0 as *const KBDLLHOOKSTRUCT);
-            let vk = kb.vkCode as u16;
-            if !modifier(vk) && kb.dwExtraInfo != OURS {
+            let raw = kb.vkCode as u16;
+            if !modifier(raw) && kb.dwExtraInfo != OURS {
+                let extended = (kb.flags.0 & LLKHF_EXTENDED.0) != 0;
+                let vk = numpad_vk(kb.scanCode as u32, extended).unwrap_or(raw);
                 let is_down = (kb.flags.0 & LLKHF_UP.0) == 0;
                 let key = Key::Keyboard(vk);
                 let matched = if is_down {
@@ -541,7 +624,18 @@ mod imp {
         let mut held: Option<Key> = None;
         let mut started_hold = false;
         for ev in rx {
-            if RECORDING.load(Ordering::Relaxed) { held = None; started_hold = false; continue; }
+            if RECORDING.load(Ordering::Relaxed) {
+                // The recorder owns the input. If a hold was in flight when it started, stop it
+                // once instead of dropping the state: otherwise the key-up is ignored and the
+                // microphone stays open for the whole recording.
+                if started_hold {
+                    logf!("hotkey", "recording started while holding: stopping dictation");
+                    crate::stt::stop();
+                }
+                held = None;
+                started_hold = false;
+                continue;
+            }
             let Some(combo) = current() else { held = None; started_hold = false; continue; };
             if let Some(h) = held {
                 if h != combo.key {
@@ -626,14 +720,19 @@ mod tests {
     }
 
     #[test]
-    fn bare_keys_and_mouse_buttons_are_allowed() {
-        assert_eq!(Combo::parse("KeyK").unwrap().key, Key::Keyboard(0x4B));
-        assert_eq!(Combo::parse("Space").unwrap().key, Key::Keyboard(0x20));
+    fn bare_typing_keys_are_rejected() {
+        for k in ["KeyK", "Space", "Digit1", "Enter", "Tab", "ArrowLeft", "Semicolon", "Numpad4", "Escape"] {
+            assert!(Combo::parse(k).is_err(), "{k} must need a modifier");
+        }
+        assert_eq!(Combo::parse("F8").unwrap().key, Key::Keyboard(0x77));
+        assert_eq!(Combo::parse("VolumeMute").unwrap().key, Key::Keyboard(0xAD));
         assert_eq!(Combo::parse("Mouse4").unwrap().key, Key::Mouse(0x05));
         assert_eq!(Combo::parse("Shift+MouseRight").unwrap().label(), "Shift+MouseRight");
+        assert_eq!(Combo::parse("Ctrl+Alt+Space").unwrap().key, Key::Keyboard(0x20));
         assert!(Combo::parse("MouseLeft").is_err(), "left click must never be a shortcut");
         assert!(Combo::parse("Ctrl").is_err(), "a modifier alone is not a key");
-        assert!(record_submit("KeyK".into()).is_ok());
+        assert!(record_submit("KeyK".into()).is_err());
+        assert!(record_submit("Ctrl+Alt+KeyK".into()).is_ok());
         *PENDING.lock().unwrap() = None;
     }
 
