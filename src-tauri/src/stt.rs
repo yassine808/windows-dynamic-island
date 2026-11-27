@@ -1,7 +1,7 @@
 // Real-time dictation: Windows speech recognition (WinRT), typed into the focused field with SendInput. No clipboard.
 use serde::Serialize;
 use std::{
-    sync::{atomic::{AtomicBool, Ordering}, mpsc::{channel, Receiver, Sender}, Mutex, OnceLock},
+    sync::{atomic::{AtomicBool, AtomicIsize, Ordering}, mpsc::{channel, Receiver, Sender}, Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -14,6 +14,30 @@ static STATE: Mutex<SttState> = Mutex::new(SttState { active: false, partial: St
 /// true = push-to-talk (listen while the shortcut is held), false = press once to start, again to stop
 pub static HOLD: AtomicBool = AtomicBool::new(false);
 pub fn hold() -> bool { HOLD.load(Ordering::Relaxed) }
+pub fn is_active() -> bool { STATE.lock().unwrap().active }
+
+/// The worker is really capturing. `STATE.active` is the UI's optimistic view; this flag stays true
+/// until StopAsync has returned, so the last phrase the engine flushes is still typed.
+static LISTENING: AtomicBool = AtomicBool::new(false);
+/// HWND that had focus when the session started. A late result must not be typed into a different
+/// window the user has switched to since.
+static TARGET: AtomicIsize = AtomicIsize::new(0);
+
+#[cfg(windows)]
+fn foreground() -> isize {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe { GetForegroundWindow().0 as isize }
+}
+#[cfg(not(windows))]
+fn foreground() -> isize { 0 }
+
+/// Remember where the text is meant to go. Called on every start, before the first result can arrive.
+fn aim() { TARGET.store(foreground(), Ordering::Relaxed); }
+
+fn on_target() -> bool {
+    let t = TARGET.load(Ordering::Relaxed);
+    t == 0 || foreground() == t
+}
 
 /// The webview can run the browser's streaming recognizer instead of WinRT: then start/stop only
 /// flip this state and notify the UI, which does the actual listening.
@@ -66,6 +90,10 @@ pub fn stt_ended() {
 /// Type a finished phrase into the focused window (same SendInput path the WinRT engine uses).
 #[tauri::command]
 pub fn stt_type(text: String) -> Result<usize, String> {
+    if !on_target() {
+        logf!("stt", "type: focus moved since dictation started, phrase dropped");
+        return Err("The focused window changed; the phrase was not typed".into());
+    }
     let out = if text.ends_with(' ') { text } else { format!("{text} ") };
     let t = std::time::Instant::now();
     let n = imp::type_out(&out)?;
@@ -80,6 +108,11 @@ pub fn stt_state() -> SttState { STATE.lock().unwrap().clone() }
 #[tauri::command]
 pub fn stt_toggle() { logf!("stt", "toggle requested from the UI"); toggle() }
 
+/// Stop without the toggle fallback: a hold release must never start a new session when the press
+/// it belongs to failed to start one.
+#[tauri::command]
+pub fn stt_stop() { logf!("stt", "stop requested from the UI"); stop() }
+
 pub fn toggle() {
     if STATE.lock().unwrap().active {
         logf!("stt", "toggle: listening -> stop");
@@ -92,6 +125,7 @@ pub fn toggle() {
 
 pub fn start() {
     WANT.store(true, Ordering::Relaxed);
+    aim(); // the window that has focus now is where the words go
     if BROWSER.load(Ordering::Relaxed) {
         *STATE.lock().unwrap() = SttState { active: true, ..Default::default() };
         logf!("stt", "start: browser engine listening");
@@ -234,6 +268,18 @@ mod imp {
         let confidence = match r.Confidence() { Ok(c) => format!("{c:?}"), Err(_) => "?".into() };
         logf!("stt", "result: status={status} confidence={confidence}");
         if !r.Status().map(|s| s == SpeechRecognitionResultStatus::Success).unwrap_or(false) { return Ok(()); }
+        if !LISTENING.load(Ordering::Relaxed) {
+            logf!("stt", "late result ignored: the session already stopped");
+            return Ok(());
+        }
+        if !on_target() {
+            logf!("stt", "result dropped: focus moved to another window since dictation started");
+            let mut s = STATE.lock().unwrap();
+            s.partial.clear();
+            drop(s);
+            emit("stt://state");
+            return Ok(());
+        }
         match r.Text() {
             Ok(t) => {
                 let t = t.to_string();
@@ -241,12 +287,21 @@ mod imp {
                 if !t.trim().is_empty() {
                     let out = format!("{} ", t.trim());
                     let started = std::time::Instant::now();
-                    match type_text(&out) {
-                        Ok(n) => logf!("stt", "typed the phrase as {n} key events in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0),
-                        Err(e) => logf!("stt", "typing failed: {e}"),
-                    }
+                    // Only what SendInput actually delivered belongs in the transcript: recording a
+                    // phrase the elevated window refused (UIPI) shows words that were never typed.
+                    let typed = type_text(&out);
                     let mut s = STATE.lock().unwrap();
-                    s.text.push_str(&out);
+                    match typed {
+                        Ok(n) => {
+                            logf!("stt", "typed the phrase as {n} key events in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
+                            s.text.push_str(&out);
+                            s.err.clear();
+                        }
+                        Err(e) => {
+                            logf!("stt", "typing failed: {e}");
+                            s.err = format!("Typing failed: {e}");
+                        }
+                    }
                     s.partial.clear();
                     logf!("stt", "transcript: {} chars total", s.text.len());
                     drop(s);
@@ -309,8 +364,33 @@ mod imp {
         }
     }
 
+    /// Start the session without blocking forever. A hold release during StartAsync used to leave
+    /// the worker deaf to Cmd::Stop with the microphone still open.
+    fn start_session(sess: &Session) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let action = sess.StartAsync().map_err(|e| hint(&e))?;
+        loop {
+            match action.Status() {
+                Ok(AsyncStatus::Completed) => return action.GetResults().map(|_| ()).map_err(|e| hint(&e)),
+                Ok(AsyncStatus::Canceled) => return Err("Dictation start was cancelled".into()),
+                Ok(AsyncStatus::Error) => {
+                    return Err(match action.GetResults() { Err(e) => hint(&e), Ok(()) => "Dictation start failed".into() });
+                }
+                _ => {}
+            }
+            if started.elapsed() > Duration::from_millis(1000) {
+                logf!("stt", "worker: start took >1 s, cancelling");
+                let _ = action.Cancel();
+                let _ = sess.CancelAsync();
+                return Err("Dictation start timed out; the microphone may be held by another app".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn fail(e: String) {
         logf!("stt", "worker: {e}");
+        LISTENING.store(false, Ordering::Relaxed);
         let mut s = STATE.lock().unwrap();
         s.active = false;
         s.partial.clear();
@@ -347,15 +427,32 @@ mod imp {
                     let Some(e) = engine.as_ref() else { continue };
                     if !WANT.load(Ordering::Relaxed) { logf!("stt", "worker: start cancelled before listening"); continue; }
                     logf!("stt", "worker: starting the continuous session");
-                    match e.sess.StartAsync().and_then(|a| a.get()) {
+                    // Accept results from the moment the session starts until StopAsync returns:
+                    // the final phrase is flushed by the stop itself and must still be typed.
+                    LISTENING.store(true, Ordering::Relaxed);
+                    match start_session(&e.sess) {
                         Ok(()) => { listening = true; logf!("stt", "worker: listening"); emit("stt://state"); }
-                        Err(err) => { fail(hint(&err)); engine = None; }
+                        Err(err) => { LISTENING.store(false, Ordering::Relaxed); fail(err); engine = None; }
+                    }
+                    // A release during StartAsync arrived after the WANT check above: stop now
+                    // instead of leaving the microphone open until the next command.
+                    if listening && !WANT.load(Ordering::Relaxed) {
+                        logf!("stt", "worker: released while starting, stopping now");
+                        let clean = match engine.as_ref() { Some(e) => stop_session(&e.sess), None => true };
+                        listening = false;
+                        LISTENING.store(false, Ordering::Relaxed);
+                        if !clean { engine = None; }
                     }
                 }
                 Ok(Cmd::Stop) => {
-                    if !listening { logf!("stt", "worker: stop with no session running"); continue; }
+                    if !listening {
+                        LISTENING.store(false, Ordering::Relaxed);
+                        logf!("stt", "worker: stop with no session running");
+                        continue;
+                    }
                     let clean = match engine.as_ref() { Some(e) => stop_session(&e.sess), None => true };
                     listening = false;
+                    LISTENING.store(false, Ordering::Relaxed);
                     if !clean {
                         // a cancelled session is not reusable: rebuild it on the next press
                         logf!("stt", "worker: dropping the recognizer after an unclean stop");
