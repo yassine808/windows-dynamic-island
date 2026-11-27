@@ -29,8 +29,28 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 pub static OVERLAY: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Default)]
-struct Hit { r: [f64; 4], dragging: bool, p: (f64, f64, bool, bool), mons: Vec<[f64; 4]> }
+struct Hit { r: [f64; 4], dragging: bool, p: (f64, f64, bool, bool), mons: Vec<[f64; 4]>, org: (i32, i32, f64), box_: Option<[f64; 4]> }
 type Shared = Arc<Mutex<Hit>>;
+
+/// The overlay is a small patch of screen around the island, not the whole desktop. The webview
+/// keeps working in desktop coordinates; this is how much of that it actually paints.
+const BOX_W: f64 = 530.0;
+const BOX_H: f64 = 446.0;
+
+/// Put the window exactly where the webview asked for it. Moving it does not change the island's
+/// screen position: the webview draws in desktop coordinates and is shifted by the window origin.
+/// The size only changes with the display scale, so it is set once at setup and on a display change.
+fn place_box(win: &tauri::WebviewWindow, b: [f64; 4], org: (i32, i32, f64)) {
+    let (minx, miny, scale) = org;
+    if scale <= 0.0 { return; }
+    let px = minx + (b[0] * scale).round() as i32;
+    let py = miny + (b[1] * scale).round() as i32;
+    let _ = win.set_position(PhysicalPosition::new(px, py));
+}
+
+fn box_size(scale: f64) -> PhysicalSize<u32> {
+    PhysicalSize::new((BOX_W * scale).round().max(1.0) as u32, (BOX_H * scale).round().max(1.0) as u32)
+}
 
 /// Pointer snapshot pushed to the webview; the UI no longer polls for it.
 #[derive(Clone, serde::Serialize)]
@@ -172,6 +192,20 @@ fn layout_of(win: &tauri::WebviewWindow) -> tauri::Result<(i32, i32, u32, u32, f
 #[tauri::command]
 fn set_hit_rect(st: State<Shared>, x: f64, y: f64, w: f64, h: f64) { st.lock().unwrap().r = [x, y, w, h]; }
 
+/// The webview says which patch of the desktop must stay painted: the island plus room for its
+/// glow and drag shadow. Everything outside it is not part of the window at all.
+#[tauri::command]
+fn set_box(win: tauri::WebviewWindow, st: State<Shared>, x: f64, y: f64, w: f64, h: f64) {
+    let (org, first) = {
+        let mut g = st.lock().unwrap();
+        let first = g.box_.is_none();
+        g.box_ = Some([x, y, w, h]);
+        (g.org, first)
+    };
+    if first { logf!("win", "island box {x:.0},{y:.0} {w:.0}x{h:.0}"); }
+    place_box(&win, [x, y, w, h], org);
+}
+
 #[tauri::command]
 async fn get_ptr(st: State<'_, Shared>) -> Result<serde_json::Value, ()> {
     let p = st.lock().unwrap().p;
@@ -226,7 +260,7 @@ fn main() {
         })
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
-            media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_dragging, set_cursor, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
+            media::media_poll, media::media_art, media::media_control, media::media_seek, set_hit_rect, set_box, set_dragging, set_cursor, log, get_ptr, get_monitors, stt::stt_state, stt::stt_toggle,
             stt::stt_engine, stt::stt_ended, stt::stt_type,
             hotkey::stt_settings, hotkey::set_stt_hold, hotkey::record_shortcut, hotkey::record_submit, hotkey::cancel_record_shortcut, hotkey::reset_shortcut,
 autostart::autostart_get, autostart::autostart_set,
@@ -243,8 +277,10 @@ autostart::autostart_get, autostart::autostart_set,
             if let Err(e) = tray::init(app.handle()) { logf!("tray", "could not add the tray icon: {e}"); }
             logf!("win", "setup: starting stats");
             stats::start();
+            media::watch(app.handle().clone());
 
-            // Transparent overlay over the whole desktop; the island lives inside it. The layout is
+            // The window is a small patch of the desktop, not the whole screen: it only ever covers
+            // the island. Its position is re-sent by the UI as the island moves; the layout here is
             // re-read on a timer below, because a resolution switch or a Parsec / remote display
             // changes the monitor union while the app is running.
             let win = app.get_webview_window("main").unwrap();
@@ -252,10 +288,16 @@ autostart::autostart_get, autostart::autostart_set,
             for m in &list {
                 logf!("win", "monitor {}x{} at {},{}", m[2], m[3], m[0], m[1]);
             }
+            // Only the island's patch of screen is painted. The webview still uses desktop
+            // coordinates and is shifted by the window origin, so the island does not move.
             win.set_position(PhysicalPosition::new(minx, miny))?;
-            win.set_size(PhysicalSize::new(ow, oh))?;
-            logf!("win", "overlay {ow}x{oh} at {minx},{miny} (scale {scale:.2})");
-            shared.lock().unwrap().mons = list.clone();
+            win.set_size(box_size(scale))?;
+            logf!("win", "overlay box {:.0}x{:.0} at {minx},{miny} (scale {scale:.2})", BOX_W * scale, BOX_H * scale);
+            {
+                let mut g = shared.lock().unwrap();
+                g.mons = list.clone();
+                g.org = (minx, miny, scale);
+            }
             win.set_ignore_cursor_events(true)?;
 
             // Window stays fully click-through. Rust reads the mouse and pushes every change to the UI;
@@ -296,16 +338,23 @@ autostart::autostart_get, autostart::autostart_set,
                         next_layout = now + Duration::from_secs(2);
                         if let Ok((nx, ny, nw, nh, ns, nl)) = layout_of(&winc) {
                             if (nx, ny, nw, nh, ns) != geo || nl != css {
-                                let _ = winc.set_position(PhysicalPosition::new(nx, ny));
-                                let _ = winc.set_size(PhysicalSize::new(nw, nh));
                                 geo = (nx, ny, nw, nh, ns);
                                 ox = nx as f64;
                                 oy = ny as f64;
                                 scale = ns;
                                 css = nl.clone();
-                                shared.lock().unwrap().mons = nl.clone();
+                                let bx = {
+                                    let mut g = shared.lock().unwrap();
+                                    g.mons = nl.clone();
+                                    g.org = (nx, ny, ns);
+                                    g.box_
+                                };
+                                // The desktop moved under the island: the same box is now at a
+                                // different physical position, and a new scale means a new size.
+                                let _ = winc.set_size(box_size(ns));
+                                if let Some(b) = bx { place_box(&winc, b, (nx, ny, ns)); }
                                 let _ = app.emit("mons", nl);
-                                logf!("win", "display change: overlay {nw}x{nh} at {nx},{ny} scale {ns:.2}");
+                                logf!("win", "display change: desktop {nw}x{nh} at {nx},{ny} scale {ns:.2}");
                             }
                         }
                     }

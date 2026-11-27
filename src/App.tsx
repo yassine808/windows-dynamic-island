@@ -14,6 +14,11 @@ type MicInfo = { engine: boolean; perm: string };
 const PAGES = 6; // 0 media, 1 dictation, 2 timer, 3 mixer, 4 stats, 5 settings
 // Each page keeps its own height. The settings rows need more room than the compact pages.
 const PAGE_H = [190, 132, 160, 140, 150, 286];
+// The overlay window is only as big as the largest island plus room for the halo and the drag
+// shadow. The island is still positioned in desktop coordinates; the window is just the patch of
+// screen it is painted on, and Rust moves that patch to follow it.
+const BOX_MAX_W = 370, BOX_MAX_H = 286, BOX_PAD = 80;
+const BOX_W = BOX_MAX_W + BOX_PAD * 2, BOX_H = BOX_MAX_H + BOX_PAD * 2;
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 // one wheel of the timer picker: scroll over it (or click the dim numbers) to change the value; wraps around
@@ -77,37 +82,83 @@ function target(e: Edge, along: number, s: { w: number; h: number }, tucked: boo
 
 const demoArt = "data:image/svg+xml;utf8," + encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop stop-color='#ff375f'/><stop offset='1' stop-color='#5e5ce6'/></linearGradient></defs><rect width='64' height='64' fill='url(#g)'/></svg>`);
 
+type MediaSnap = Omit<NonNullable<Media>, "at">;
+type ArtReply = { key: string; art: string };
+
 function useMedia() {
   const [media, setMedia] = useState<Media>(DEMO ? { title: "Blinding Lights", artist: "The Weeknd", playing: true, position: 42000, duration: 215000, at: performance.now() } : null);
   const [art, setArt] = useState<string | null>(DEMO ? demoArt : null);
   const last = useRef("");
   const freeze = useRef(0); // after a seek, ignore the (stale) polled position for a moment
+  // Every snapshot has a generation. A poll or thumbnail that started before a newer song was
+  // announced is dropped instead of overwriting what is playing now.
+  const gen = useRef(0);
+  const artGen = useRef(0);
+
+  const apply = (m: MediaSnap | null, g: number) => {
+    if (g !== gen.current) return;
+    const now = performance.now();
+    setMedia((prev) => {
+      if (!m) return null;
+      // Keep the old anchor while the player reports the same position. Resetting `at` on every
+      // poll made a stale position stand still (and the remaining time drift away).
+      if (now < freeze.current && prev) return { ...m, position: prev.position, at: prev.at };
+      if (prev && prev.title === m.title && prev.artist === m.artist && prev.position === m.position && prev.duration === m.duration && prev.playing === m.playing) {
+        return prev;
+      }
+      return { ...m, at: now };
+    });
+    const k = m ? `${m.title}|${m.artist}` : "";
+    if (k === last.current) return;
+    last.current = k;
+    const ag = ++artGen.current;
+    setArt(null); // never keep the previous cover under a new title while its own art loads
+    if (!m) return;
+    // The song can switch between reading the metadata and reading the thumbnail, in which case
+    // Rust refuses to hand back the wrong cover. Ask again for the title the UI is showing now.
+    const loadArt = (tries: number) => {
+      invoke<ArtReply | null>("media_art", { key: k })
+        .then((r) => {
+          if (ag !== artGen.current) return;
+          if (r && r.key === k) { setArt(r.art); return; }
+          if (tries < 3) window.setTimeout(() => loadArt(tries + 1), 250);
+        })
+        .catch(() => {});
+    };
+    loadArt(0);
+  };
+
   useEffect(() => {
     if (!TAURI) return;
+    let stopped = false;
+    let timer = 0;
+    // Position anchor, once a second, sequential: a slow WinRT call can never queue up behind itself.
     const tick = async () => {
+      const g = ++gen.current;
       try {
-        const m = await invoke<Omit<NonNullable<Media>, "at"> | null>("media_poll");
-        const now = performance.now();
-        setMedia((prev) => {
-          if (!m) return null;
-          // Keep the old anchor while the player reports the same position. Resetting `at` on every
-          // one-second poll made a stale position stand still (and the remaining time drift away).
-          if (now < freeze.current && prev) return { ...m, position: prev.position, at: prev.at };
-          if (prev && prev.title === m.title && prev.artist === m.artist && prev.position === m.position && prev.duration === m.duration && prev.playing === m.playing) {
-            return { ...m, at: prev.at };
-          }
-          return { ...m, at: now };
-        });
-        const k = m ? `${m.title}|${m.artist}` : "";
-        if (k !== last.current) {
-          last.current = k;
-          setArt(m ? await invoke<string | null>("media_art") : null);
-        }
-      } catch { setMedia(null); }
+        const m = await invoke<MediaSnap | null>("media_poll");
+        if (!stopped) apply(m, g);
+      } catch {
+        if (!stopped) apply(null, g);
+      }
+      if (!stopped) timer = window.setTimeout(tick, 1000);
     };
     tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
+    // Rust pushes a new song, artist or play/pause as soon as the media session reports it; this is
+    // what removes the wait for the next poll.
+    let un: (() => void) | undefined, gone = false;
+    listen<MediaSnap | null>("media", (e) => {
+      gen.current++; // supersede any poll that started before this change
+      apply(e.payload, gen.current);
+    })
+      .then((f) => { if (gone) f(); else un = f; })
+      .catch((err) => dbg("media listener failed: " + String(err)));
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      gone = true;
+      un?.();
+    };
   }, []);
   return { media, art, setMedia, freeze };
 }
@@ -353,14 +404,35 @@ const Bar = ({ level, k }: { level: MotionValue<number>; k: number }) => {
   const s = useTransform(level, (v) => Math.min(1, 0.2 + v * k));
   return <motion.i style={{ scaleY: s }} />;
 };
-const Bars = ({ playing, level }: { playing: boolean; level?: MotionValue<number> }) =>
-  level ? (
-    <div className="bars">{GAIN.map((k, i) => <Bar key={i} level={level} k={k} />)}</div>
-  ) : (
-    <div className={`bars ${playing ? "live" : "paused"}`}>
+const Bars = ({ playing, level }: { playing: boolean; level?: MotionValue<number> }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !playing || level) return;
+    // Ten frames a second instead of a 60 fps CSS animation. The waveform is five small bars, so
+    // the eye cannot tell; the compositor, however, only draws when a bar actually changes instead
+    // of presenting the whole window on every vsync while music plays.
+    const kids = Array.from(el.children) as HTMLElement[];
+    const delays = [0, -0.3, -0.6, -0.15, -0.45];
+    const draw = () => {
+      const t = performance.now() / 900;
+      for (let i = 0; i < kids.length; i++) {
+        const p = ((t + delays[i]) % 1 + 1) % 1;
+        const f = 0.3 + 0.7 * (0.5 - 0.5 * Math.cos(2 * Math.PI * p));
+        kids[i].style.transform = `scaleY(calc(var(--h) * ${f.toFixed(3)}))`;
+      }
+    };
+    draw();
+    const id = window.setInterval(draw, 100);
+    return () => { window.clearInterval(id); kids.forEach((k) => { k.style.transform = ""; }); };
+  }, [playing, level]);
+  if (level) return <div className="bars">{GAIN.map((k, i) => <Bar key={i} level={level} k={k} />)}</div>;
+  return (
+    <div ref={ref} className={`bars ${playing ? "live" : "paused"}`}>
       {PROFILE.map((h, i) => <i key={i} style={{ "--h": h } as CSSProperties} />)}
     </div>
   );
+};
 
 // both times round down, so the clock never runs ahead of the audio
 const fmt = (ms: number) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
@@ -584,6 +656,12 @@ export default function App() {
   // at full size, then scaled up from that edge point. Scaling (instead of animating width and
   // height) is what makes it grow out of the edge like a tree, with no sideways slide.
   const [placed, setPlaced] = useState(!TAURI);
+  // Desktop coordinates are unchanged; this shift puts the island inside the small overlay window.
+  // Rust moves the window, the island itself never moves because of it. Motion values keep the
+  // shift off React's render path: it changes on every frame of a drag or a spring.
+  const ox = useMotionValue(0), oy = useMotionValue(0);
+  const panX = useTransform(ox, (v) => -v), panY = useTransform(oy, (v) => -v);
+  const orgRef = useRef({ x: 0, y: 0 });
   const w = useMotionValue(126), h = useMotionValue(37), r = useMotionValue(18.5), lift = useMotionValue(1), flat = useMotionValue(1);
   const spawn = useMotionValue(TAURI ? 0.2 : 1);
   const rad = useTransform([r, flat], (v: number[]) => {
@@ -837,6 +915,29 @@ export default function App() {
     return () => clearTimeout(id);
   }, [edge, hover, pin, dragging, stt.active, nonce, hideUD, hideLR, fsHide, fsTuck, tm.done]);
 
+  // Keep the overlay window over the island. The box is the largest island plus room for the glow
+  // and the drag shadow, anchored to the same edge point, so the island can grow, tuck and spring
+  // inside it without ever reaching the window edge.
+  useEffect(() => {
+    if (!TAURI || !placed) return;
+    let raf = 0, last = "";
+    const push = () => {
+      raf = 0;
+      const bx = Math.round(ex.get() - BOX_MAX_W * fx.get() - BOX_PAD);
+      const by = Math.round(ey.get() - BOX_MAX_H * fy.get() - BOX_PAD);
+      const k = `${bx},${by}`;
+      if (k === last) return;
+      last = k;
+      orgRef.current = { x: bx, y: by };
+      ox.set(bx); oy.set(by);
+      invoke("set_box", { x: bx, y: by, w: BOX_W, h: BOX_H }).catch(() => {});
+    };
+    const sched = () => { if (!raf) raf = requestAnimationFrame(push); };
+    const stops = [ex, ey, fx, fy].map((v) => v.on("change", sched));
+    sched();
+    return () => { stops.forEach((off) => off()); if (raf) cancelAnimationFrame(raf); };
+  }, [placed]);
+
   // report hit rect so Rust can toggle click-through; driven by the springs themselves, so an idle
   // island costs nothing instead of running a 60 Hz timer
   useEffect(() => {
@@ -962,18 +1063,21 @@ export default function App() {
     let active = false, btn: HTMLElement | null = null, sk: DOMRect | null = null, skId: string | undefined;
     let held = false; // the dictation mic is being held down in Hold mode
     let hand = false; // last cursor shape we pushed to the OS
-    const frac = (p: P) => (sk ? (p.x - sk.left) / sk.width : 0);
+    const frac = (p: P) => (sk ? (p.x - orgRef.current.x - sk.left) / sk.width : 0);
     const onPtr = (p: P) => {
+      // Pointer coordinates are desktop coordinates; element hit-testing and DOM rects are window
+      // coordinates, which start at the overlay's top-left corner.
+      const vx = p.x - orgRef.current.x, vy = p.y - orgRef.current.y;
       if (!d.current?.on) setHover(p.inside);
       // Keep the OS cursor honest even when WebView2 misses the element change: hand only over a
       // button or a seek bar, arrow everywhere else.
-      const overHand = !!document.elementFromPoint(p.x, p.y)?.closest("button, .seek:not(.off)");
+      const overHand = !!document.elementFromPoint(vx, vy)?.closest("button, .seek:not(.off)");
       if (overHand !== hand) { hand = overHand; invoke("set_cursor", { hand }).catch(() => {}); }
       const f = fn.current;
       if (p.down && !active) {
         if (!p.inside) return;
         active = true;
-        const el = document.elementFromPoint(p.x, p.y);
+        const el = document.elementFromPoint(vx, vy);
         btn = el?.closest("button") as HTMLElement | null;
         const seek = !btn ? (el?.closest(".seek:not(.off)") as HTMLElement | null) : null;
         if (seek) { sk = seek.getBoundingClientRect(); skId = seek.dataset.id; seekFn.current(frac(p), false, skId); }
@@ -994,7 +1098,7 @@ export default function App() {
         else if (btn) {
           btn.classList.remove("pressed");
           if (held) { held = false; if (sttRef.current.active) call("stt_toggle"); }
-          else if (document.elementFromPoint(p.x, p.y)?.closest("button") === btn) btn.click();
+          else if (document.elementFromPoint(vx, vy)?.closest("button") === btn) btn.click();
           btn = null;
         } else f.pup();
       }
@@ -1071,6 +1175,7 @@ export default function App() {
   const vp = { variants: pageV, initial: "initial", animate: "animate", exit: "exit" } as const;
   return (
     <div className={`stage ${dragging ? "dragging" : ""} ${fsHide ? "fsgone" : ""}`} style={{ ["--accent" as string]: tint ? `color-mix(in srgb, ${tint} 55%, white)` : "#fff" }}>
+      <motion.div className="pan" style={{ x: panX, y: panY }}>
       <motion.div className="glow" style={{ ...box, borderRadius: rad }} animate={{ opacity: placed ? (siri ? 0.35 : tint && media ? (mode === "expanded" ? 0.16 : 0.1) : 0) : 0 }} transition={{ duration: 0.6 }}>
         <div className={`halo ${siri ? "siri" : ""}`} style={{ background: siri ? undefined : tint }} />
       </motion.div>
@@ -1271,6 +1376,7 @@ export default function App() {
             {Array.from({ length: PAGES }, (_, i) => <button key={i} aria-label={`Page ${i + 1}`} className={page === i ? "on" : ""} onClick={() => { setDir(i > page ? 1 : -1); setPage(i); }} />)}
           </motion.div>
         </motion.div>
+      </motion.div>
       </motion.div>
     </div>
   );

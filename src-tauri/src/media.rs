@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
+use tauri::Emitter;
 
 #[derive(Serialize, Clone)]
 pub struct MediaInfo {
@@ -8,6 +9,12 @@ pub struct MediaInfo {
     pub playing: bool,
     pub position: i64,
     pub duration: i64,
+}
+
+#[derive(Serialize)]
+pub struct ArtReply {
+    pub key: String,
+    pub art: String,
 }
 
 #[cfg(windows)]
@@ -57,15 +64,24 @@ mod imp {
         Some(MediaInfo { title, artist: p.Artist().map(|a| a.to_string()).unwrap_or_default(), playing, position, duration })
     }
 
-    pub fn art() -> Option<String> {
+    /// Fetch the thumbnail for exactly the song the UI asked for. The session can switch between
+    /// the metadata poll and this call; returning the new song's cover for the old key is what left
+    /// the pill showing the previous image, so a mismatched key returns nothing and the UI asks
+    /// again for the song that is actually current.
+    pub fn art_for(key: &str) -> Option<ArtReply> {
         let p = session()?.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
+        let title = p.Title().ok()?.to_string();
+        let artist = p.Artist().map(|a| a.to_string()).unwrap_or_default();
+        if format!("{title}|{artist}") != key {
+            return None;
+        }
         let stream = p.Thumbnail().ok()?.OpenReadAsync().ok()?.get().ok()?;
         let size = stream.Size().ok()? as u32;
         let reader = DataReader::CreateDataReader(&stream).ok()?;
         reader.LoadAsync(size).ok()?.get().ok()?;
         let mut buf = vec![0u8; size as usize];
         reader.ReadBytes(&mut buf).ok()?;
-        Some(format!("data:image/png;base64,{}", STANDARD.encode(buf)))
+        Some(ArtReply { key: key.to_string(), art: format!("data:image/png;base64,{}", STANDARD.encode(buf)) })
     }
 
     pub fn seek(ms: i64) {
@@ -91,9 +107,31 @@ mod imp {
 mod imp {
     use super::*;
     pub fn poll() -> Option<MediaInfo> { None }
-    pub fn art() -> Option<String> { None }
+    pub fn art_for(_: &str) -> Option<ArtReply> { None }
     pub fn control(_: &str) {}
     pub fn seek(_: i64) {}
+}
+
+/// Push a new song, artist or play/pause state to the webview as soon as the media session reports
+/// it. The webview still polls once a second for the playback position; this only removes the wait
+/// for the metadata that made a song appear up to two seconds late.
+pub fn watch(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut last: Option<(String, String, bool)> = None;
+        loop {
+            let m = imp::poll();
+            let key = m.as_ref().map(|x| (x.title.clone(), x.artist.clone(), x.playing));
+            if key != last {
+                match &m {
+                    Some(x) => logf!("media", "session: {} - {} ({})", x.title, x.artist, if x.playing { "playing" } else { "paused" }),
+                    None => logf!("media", "session: none"),
+                }
+                last = key;
+                let _ = app.emit("media", &m);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    });
 }
 
 // async commands run off the main thread; WinRT .get() on the UI thread can deadlock it.
@@ -103,8 +141,8 @@ pub async fn media_poll() -> Option<MediaInfo> {
 }
 
 #[tauri::command]
-pub async fn media_art() -> Option<String> {
-    tauri::async_runtime::spawn_blocking(imp::art).await.ok().flatten()
+pub async fn media_art(key: String) -> Option<ArtReply> {
+    tauri::async_runtime::spawn_blocking(move || imp::art_for(&key)).await.ok().flatten()
 }
 
 #[tauri::command]

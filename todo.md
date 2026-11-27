@@ -179,6 +179,15 @@
 - [x] In GitHub I wanted to add the link to download the latest version, add tagsThen push the git
       release the latest version, the setup.
 
+## Requests, as written (round 10)
+
+- [x] meanwhile fix bug of the stt ilsand, sometimes it still shows the previous music iamge in the
+      STT, even tho im playing the next song, it doesn't update! also make the stt island react
+      faster, there's a 2s delay when i start music in youtube music and when it actually shows im
+      playing it in the stt island!
+- [x] make it as light as possible: the overlay window is the island's patch of screen now, not the
+      whole desktop (530x446 instead of the monitor union)
+
 ## Notes
 
 - SonarCloud Code Analysis is a GitHub App check (`sonarqubecloud`), not a workflow in this repo.

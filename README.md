@@ -23,7 +23,7 @@ lives on the screen edge.
 
 ## Install
 
-Download `IslandWin_0.1.1_x64-setup.exe` from the
+Download `IslandWin_0.1.3_x64-setup.exe` from the
 [latest release](https://github.com/yassine808/windows-dynamic-island/releases/latest) and run it. It needs
 no administrator rights: the app goes to `%LOCALAPPDATA%\IslandWin`, and WebView2 is already on
 Windows 11 (the setup downloads it on Windows 10 if it is missing).
@@ -72,7 +72,8 @@ so both files stay small and the app keeps logging.
   are never confused, and it stays there when the music stops.
 - Idle use is kept low: the Stats samplers and `nvidia-smi` only run while the Stats page is open,
   and the WinRT media manager and audio endpoint enumerator are cached instead of rebuilt on every
-  poll. The island behaves exactly the same.
+  poll. The overlay window is only the island's patch of screen, not the whole desktop, and the
+  waveform steps at 10 fps instead of a 60 fps animation. The island behaves exactly the same.
 - Cursor stays the normal arrow over the island. The hand appears only on things you can click:
   buttons and sliders. During a real drag it becomes a grabbing hand.
 - Settings has a **Lock position** switch: the island stays where it is until you unlock it, while
@@ -97,7 +98,7 @@ Media, Dictation, Timer, Mixer, Stats, Settings.
 1. Install Node 20+, Rust (stable MSVC) and WebView2 (preinstalled on Windows 11).
 2. `npm install`
 3. `npm run tauri dev` for the live app, `npm run tauri build` for
-   `src-tauri/target/release/bundle/nsis/IslandWin_0.1.1_x64-setup.exe`.
+   `src-tauri/target/release/bundle/nsis/IslandWin_0.1.3_x64-setup.exe`.
 
 The installer hook (`src-tauri/windows/installer.nsh`) adds the Run entry, and the app keeps it
 pointing at the executable it is actually running from, so moving the app does not break autostart.

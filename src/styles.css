@@ -10,6 +10,9 @@
 html, body, #root { margin: 0; height: 100%; background: transparent; overflow: hidden; font-family: var(--font); color: var(--label); -webkit-font-smoothing: antialiased; user-select: none; }
 
 .stage { position: fixed; inset: 0; overflow: hidden; transition: opacity 0.18s ease; }
+/* the overlay window is a small patch of the desktop: shift the whole scene so the island keeps
+   using desktop coordinates inside it */
+.pan { position: absolute; left: 0; top: 0; width: 0; height: 0; }
 /* a fullscreen window or app owns the screen: the island fades out and stops taking clicks */
 .stage.fsgone { opacity: 0; pointer-events: none; }
 
@@ -74,13 +77,8 @@ html, body, #root { margin: 0; height: 100%; background: transparent; overflow: 
 
 .bars { display: flex; align-items: center; gap: 2px; height: 15px; flex: none; }
 .bars i { --h: 1; width: 2.6px; height: 100%; border-radius: 2px; background: var(--accent, #fff); transform-origin: center; }
-.bars.live i { animation: bar 0.9s ease-in-out infinite; }
-.bars.live i:nth-child(2) { animation-delay: -0.3s; }
-.bars.live i:nth-child(3) { animation-delay: -0.6s; }
-.bars.live i:nth-child(4) { animation-delay: -0.15s; }
-.bars.live i:nth-child(5) { animation-delay: -0.45s; }
+/* the live waveform is stepped from JS at ~10 fps (see Bars) instead of a 60 fps CSS animation */
 .bars.paused i { transform: scaleY(calc(var(--h) * 0.4)); }
-@keyframes bar { 0%, 100% { transform: scaleY(calc(var(--h) * 0.3)); } 50% { transform: scaleY(var(--h)); } }
 
 /* progress, iOS style */
 .prog { display: flex; align-items: center; gap: 9px; font-size: 11px; font-weight: 600; color: var(--label-secondary); font-variant-numeric: tabular-nums; }
