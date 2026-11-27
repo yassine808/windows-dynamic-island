@@ -7,6 +7,7 @@
 - [x] Verify: cargo test, tsc, vite build, Tauri bundle
 - [x] Commit and push
 - [x] Add the Ambient light setting
+- [x] Release 0.1.4 and install it
 
 ## Log
 
@@ -26,4 +27,10 @@
 - Goal: add a Settings switch for the cover-colour glow around the island.
 - Done: persisted `ambient` preference (default on), gated the halo tint and opacity while keeping the waveform accent, added the Settings row, and tightened the settings row gap so six rows fit the existing 286 px page. Also committed the CSP hardening left from the previous session.
 - Verified: `npm run typecheck`, `npm run build`, `node scripts/design-check.mjs` all pass. Headless-browser check at 530x446: the six-row Settings page fits, Off stores `ambient=off` and survives a reload, glow opacity stays 0; On restores opacity 0.16.
+- Next: none.
+
+### 2026-11-27 — Release 0.1.4
+- Goal: ship the ambient light setting and the audit fixes as a GitHub release, then install it locally.
+- Done: bumped package, Cargo and Tauri to 0.1.4; updated the README installer name; built `IslandWin_0.1.4_x64-setup.exe` (2.42 MiB); tagged `v0.1.4`; published the release with the setup. Stopped 0.1.3, silent-installed 0.1.4 over it, and launched the installed app.
+- Verified: `cargo test --locked` — 8 passed. Installer SHA-256 `506bc613546f72c96712d2aa4d71561b8be819c92f5fa0ffa6dd48d5bf17a00c` matches the release asset. Installed exe reports 0.1.4. Startup log shows autostart on, hotkey hooks, tray icon, both monitors, the Madonna media session, STT engine ready, the island box, and click-through toggling.
 - Next: none.
