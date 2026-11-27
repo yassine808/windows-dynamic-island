@@ -1,125 +1,73 @@
 # IslandWin
 
-Dynamic Island for Windows: media controls, dictation, timers and system stats in one pill that
-lives on the screen edge.
-
-![CI](https://github.com/yassine808/windows-dynamic-island/actions/workflows/ci.yml/badge.svg)
-
-**[Download the latest version](https://github.com/yassine808/windows-dynamic-island/releases/latest)** — Windows 10/11, no administrator rights.
+A Dynamic Island for Windows: media controls, dictation, timers, volume and system stats in one
+small pill on the edge of your screen.
 
 ![Dictation: the collapsed pill shows words as you speak](docs/listening.png)
 
-| Media controls | Dictation |
-| --- | --- |
-| ![Media controls](docs/media.png) | ![Dictation page](docs/dictation.png) |
+## Download
 
-| Timer | Alarm |
-| --- | --- |
-| ![Timer picker](docs/timer.png) | ![Timer alarm](docs/alarm.png) |
+**[Download the latest version](https://github.com/yassine808/windows-dynamic-island/releases/latest)**
 
-| Collapsed | Settings |
-| --- | --- |
-| ![Collapsed pill](docs/collapsed.png) | ![Settings page](docs/settings.png) |
+Windows 10/11 · no administrator rights · 2.4 MB
 
 ## Install
 
-Download `IslandWin_0.1.3_x64-setup.exe` from the
-[latest release](https://github.com/yassine808/windows-dynamic-island/releases/latest) and run it. It needs
-no administrator rights: the app goes to `%LOCALAPPDATA%\IslandWin`, and WebView2 is already on
-Windows 11 (the setup downloads it on Windows 10 if it is missing).
+1. Download `IslandWin_0.1.3_x64-setup.exe`.
+2. Run it. No administrator rights are needed.
+3. IslandWin starts with Windows by default. You can turn that off in its Settings.
 
-The setup turns on **Start with Windows** for you (it is the default answer to its one question),
-and the same switch is on the island's **Settings** page, so it can be turned off at any time.
+## What it does
 
-Upgrading or uninstalling never touches your data:
+- **Media** — shows the song and cover from Spotify or a browser. Hover for prev / play / next and seek.
+- **Dictation** — hold the shortcut and speak; the words are typed into the field you are in.
+- **Timer** — 5, 15 or 25 minutes, or set your own. The island rings when time is up.
+- **Mixer** — speaker and microphone volume, with mute.
+- **Stats** — CPU, RAM, network and NVIDIA GPU.
 
-| What | Where |
+| Media | Dictation |
 | --- | --- |
-| Settings (shortcut, hold/toggle) | `%APPDATA%\Windows Dynamic Island\settings.json` |
-| Log (app + dictation timings; rotates at 2 MB) | `%APPDATA%\Windows Dynamic Island\logs\islandwin.log` |
-| UI preferences (edge, auto-hide) | the webview's local storage for the app |
-| Autostart | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\IslandWin` |
+| ![Media controls](docs/media.png) | ![Dictation page](docs/dictation.png) |
 
-The first launch of this version copies the old `%APPDATA%\dev.yassine808.islandwin` settings and log
-into the new folder; the old folder is left in place.
+| Timer | Settings |
+| --- | --- |
+| ![Timer](docs/timer.png) | ![Settings](docs/settings.png) |
 
-The log never grows past ~2 MB: when full it rotates to `logs\islandwin.old.log` (one previous file),
-so both files stay small and the app keeps logging.
+## How to use
 
-## Use
+- Hover over the pill to expand it; move away to collapse.
+- Drag it to a screen edge. It snaps there and tucks away when idle.
+- Scroll the mouse wheel over it to switch pages.
+- Dictation shortcut is `Ctrl+Alt+Space` by default; change it on the Dictation page.
+- In windowed or borderless fullscreen games the island tucks into the edge; in exclusive fullscreen
+  it hides. You can change this in Settings.
+- The tray icon opens Settings. Right-click it to quit.
 
-- Play music in Spotify or a browser: the island shows it. Hover to expand, use prev / play / next.
-- Drag the island: it flicks and snaps to the nearest screen edge. Near the middle of the screen it
-  sticks to the center (like Word's guides) until you pull away. On left/right/bottom it turns
-  vertical and tucks away when idle.
-- Changing the resolution or connecting a Parsec / remote display moves the overlay with the desktop,
-  so the island stays on its edge instead of staying at the old screen's coordinates.
-- Scroll the mouse wheel over the island to switch pages; a long scroll keeps going to the last page.
-- Dictation shortcut defaults to `Ctrl+Alt+Space`. On the Dictation page, click the shortcut chip and
-  press any key or any mouse button (bare keys work; left click is never recorded). The island takes
-  the keyboard for a moment so the capture also works over a fullscreen game or an elevated window.
-  Click the chip again to cancel. The red reset button puts `Ctrl+Alt+Space` back. Hold / Toggle picks
-  push-to-talk or press-to-start/stop.
-- Finished phrases are typed into whatever text field has focus. Needs
-  Settings > Privacy > Speech > Online speech recognition.
-- The Windows recognizer is built once at launch on a background thread, so a press starts listening
-  instead of compiling the dictation grammar again, and start/stop reach the island immediately.
-- Timer: pick 5, 15 or 25 minutes to fill the hours / minutes wheels, or turn the wheels yourself,
-  then press play. Pause and resume with the same button. When it reaches zero the island grows into
-  an alarm pill with a looping chime and stays there, ringing, until you press **Stop**.
-- The collapsed pill shows the track's elapsed time while media plays; with nothing playing it shows
-  the normal 12-hour clock. A running timer takes that spot with a stopwatch icon, so the two numbers
-  are never confused, and it stays there when the music stops.
-- Idle use is kept low: the Stats samplers and `nvidia-smi` only run while the Stats page is open,
-  and the WinRT media manager and audio endpoint enumerator are cached instead of rebuilt on every
-  poll. The overlay window is only the island's patch of screen, not the whole desktop, and the
-  waveform steps at 10 fps instead of a 60 fps animation. The island behaves exactly the same.
-- Cursor stays the normal arrow over the island. The hand appears only on things you can click:
-  buttons and sliders. During a real drag it becomes a grabbing hand.
-- Settings has a **Lock position** switch: the island stays where it is until you unlock it, while
-  its buttons, wheels and sliders keep working.
-- Set `SCRUBBER = false` in `src/App.tsx` to hide the elapsed/total bar.
-- The notification-area icon opens Settings on left click. Right click shows Settings, Start with
-  Windows (the same switch as the Settings page) and Quit. Windows hides new tray icons behind the
-  `^` overflow until you pin them to the taskbar.
+## Requirements
 
-## Pages
+Windows 10 or 11. WebView2 comes with Windows 11; the installer adds it on Windows 10 if needed.
 
-Media, Dictation, Timer, Mixer, Stats, Settings.
+Dictation uses Windows speech recognition, so turn on **Settings > Privacy > Speech > Online speech
+recognition**.
 
-- **Settings**: auto-hide per axis (up/down, left/right), fullscreen behavior (with it on, a windowed
-  / borderless fullscreen app tucks the island into its edge, and a fullscreen-exclusive app hides it
-  completely; a normal maximized window does not count), lock position, and Start with Windows.
-- **Mixer**: speaker and mic volume sliders with mute buttons (default devices).
-- **Stats**: CPU, RAM, network, and GPU (NVIDIA only, needs `nvidia-smi`; shows n/a otherwise).
+## Your data
+
+Settings and logs are kept in `%APPDATA%\Windows Dynamic Island`. Upgrading or uninstalling does not
+delete them. Uninstall from Windows Settings > Apps.
+
+Media, volume and stats are read locally. Dictation audio goes to Microsoft's speech service.
 
 ## Build from source
 
-1. Install Node 20+, Rust (stable MSVC) and WebView2 (preinstalled on Windows 11).
-2. `npm install`
-3. `npm run tauri dev` for the live app, `npm run tauri build` for
-   `src-tauri/target/release/bundle/nsis/IslandWin_0.1.3_x64-setup.exe`.
+![CI](https://github.com/yassine808/windows-dynamic-island/actions/workflows/ci.yml/badge.svg)
 
-The installer hook (`src-tauri/windows/installer.nsh`) adds the Run entry, and the app keeps it
-pointing at the executable it is actually running from, so moving the app does not break autostart.
+Needs Node 20+, Rust (stable MSVC) and WebView2.
 
-## Checks
+```sh
+npm install
+npm run tauri dev    # live app
+npm run tauri build  # installer
+```
 
-CI runs on every push and pull request:
-
-- `npm run typecheck`, `npm run build` — TypeScript and the production bundle.
-- `node scripts/design-check.mjs` — the Apple-style guardrails: one color palette, one type scale,
-  the two house easing curves, reduced-motion support, no emoji, WCAG AA contrast for the text.
-- `cargo check --all-targets`, `cargo test` — the Rust side, including the shortcut recorder's key
-  names and combo rules, the autostart round trip, the fullscreen-window rules, and the 2 MB log cap.
-  Two end-to-end tests touch the real desktop and the real Run key, so they are opt-in locally with
-  `ISLANDWIN_E2E=1 cargo test`.
-- `node scripts/secret-scan.mjs` — no tokens, private keys or secret files in tracked files.
-
-Dictation latency and CPU/RAM measurements, and how to reproduce them, are in
-[`benchmarks/`](benchmarks/README.md).
-
-## Privacy
-
-Dictation audio goes to the speech recognition service that Windows and WebView2 use (Microsoft);
-nothing else leaves the machine. Media, volume and stats are read locally.
+CI runs typecheck, the production build, the design checks, `cargo check`, `cargo test` and a secret
+scan on every push. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
