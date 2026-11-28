@@ -8,6 +8,7 @@
 - [x] Commit and push
 - [x] Add the Ambient light setting
 - [x] Release 0.1.4 and install it
+- [x] Authenticode signing pipeline and signed 0.1.4 build
 
 ## Log
 
@@ -32,5 +33,11 @@
 ### 2026-11-27 — Release 0.1.4
 - Goal: ship the ambient light setting and the audit fixes as a GitHub release, then install it locally.
 - Done: bumped package, Cargo and Tauri to 0.1.4; updated the README installer name; built `IslandWin_0.1.4_x64-setup.exe` (2.42 MiB); tagged `v0.1.4`; published the release with the setup. Stopped 0.1.3, silent-installed 0.1.4 over it, and launched the installed app.
-- Verified: `cargo test --locked` — 8 passed. Installer SHA-256 `506bc613546f72c96712d2aa4d71561b8be819c92f5fa0ffa6dd48d5bf17a00c` matches the release asset. Installed exe reports 0.1.4. Startup log shows autostart on, hotkey hooks, tray icon, both monitors, the Madonna media session, STT engine ready, the island box, and click-through toggling.
+- Verified: `cargo test --locked` - 8 passed. Installer SHA-256 `506bc613546f72c96712d2aa4d71561b8be819c92f5fa0ffa6dd48d5bf17a00c` matches the release asset. Installed exe reports 0.1.4. Startup log shows autostart on, hotkey hooks, tray icon, both monitors, the Madonna media session, STT engine ready, the island box, and click-through toggling.
+- Next: none.
+
+### 2026-11-28 - Authenticode signing pipeline
+- Goal: sign the release binaries and make the signing repeatable.
+- Done: added `scripts/lib/signing.mjs` and `scripts/lib/powershell.mjs` (store certificate selection, `signtool` discovery, sign + timestamp), `scripts/package.mjs` (signing `tauri build` wrapper), `scripts/sign.mjs` (sign existing files) and `scripts/verify-signatures.mjs` (release gate). Wired `npm run package`, `sign` and `verify:signatures`; documented the flow in `docs/SIGNING.md` and updated `AGENTS.md` and the README. Tauri signs the binary it hands to NSIS and then restores the unsigned build output, so `package.mjs` signs `target/release/islandwin.exe` once more after the build.
+- Verified: `npm run package` with `WINDOWS_CERT_SHA1=E67DEFE41D4E1004B3F93808216462F644A9B10F` signed `islandwin.exe` and `IslandWin_0.1.4_x64-setup.exe`, both timestamped. `verify-signatures` accepts them with `ALLOW_SELF_SIGNED=1` and refuses them without it, which is the intended release behaviour. Extracted the setup with 7-Zip: the embedded `islandwin.exe` is signed too. `tsc --noEmit`, design check and `cargo test --locked` pass.
 - Next: none.

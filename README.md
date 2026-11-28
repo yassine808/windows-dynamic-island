@@ -66,8 +66,11 @@ Needs Node 20+, Rust (stable MSVC) and WebView2.
 ```sh
 npm install
 npm run tauri dev    # live app
-npm run tauri build  # installer
+npm run package      # signed installer (see docs/SIGNING.md)
 ```
+
+`npm run package` signs the app and the installer when a code-signing certificate is installed, and
+builds unsigned when none is. `npm run verify:signatures` checks the result.
 
 CI runs typecheck, the production build, the design checks, `cargo check`, `cargo test` and a secret
 scan on every push. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).

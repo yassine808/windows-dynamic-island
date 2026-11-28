@@ -14,7 +14,8 @@ node scripts/design-check.mjs
 cd src-tauri
 cargo check --all-targets --locked
 cargo test --locked
-npm run tauri build      # NSIS installer
+npm run package          # signed NSIS installer (see docs/SIGNING.md)
+npm run verify:signatures
 ```
 
 CI (`.github/workflows/ci.yml`) runs typecheck, build, design checks, `cargo check`, `cargo test`
